@@ -1,0 +1,67 @@
+---
+alwaysApply: true
+description: "Project-wide engineering rules: clarify-first, minimal diffs, evidence-based planning"
+---
+# 00-project — Project Engineering Rules (Clarify-First)
+
+## Operating Mode
+- **Do not start writing code immediately.** In the early/project-setup phase, prioritize:
+  1) understanding the goal and constraints,
+  2) identifying missing details,
+  3) proposing feasible implementation options with pros/cons,
+  4) agreeing on a plan and acceptance criteria,
+  5) then implementing.
+
+- If the user explicitly asks for code right away, still begin with a **brief plan + assumptions**, then proceed.
+
+## Clarification-First Discipline
+- **Actively ask questions** whenever requirements, inputs/outputs, edge cases, environment, or success criteria are unclear.
+- Prefer **short, high-signal questions** (3–8 questions) over guessing.
+- If you must proceed with incomplete information:
+  - state assumptions explicitly,
+  - mark them as assumptions,
+  - and suggest how to validate them quickly.
+
+## Scope Control
+- **Do not modify unrelated code.** Avoid drive-by refactors, formatting-only changes, renames, or dependency upgrades unless they are required for the requested change.
+- Keep diffs **small and reviewable**. If a refactor is necessary, separate it into an isolated commit or clearly separated change blocks.
+
+## Reasoning and Rigor (Without Overexposure)
+- Provide **step-by-step rationale** at the level needed for engineering decisions:
+  - what you will do,
+  - why it is needed,
+  - what alternatives were considered,
+  - what risks exist and how they are mitigated.
+- Use a structured format such as:
+  - **Context → Assumptions → Options → Recommendation → Plan → Risks/Tradeoffs**
+- Do **not** include verbose internal deliberation. Prefer concise, decision-oriented reasoning.
+
+## Read Before You Write
+- Before implementing changes (global or within a module directory):
+  - **Read the nearest README** in the current working directory and any relevant submodule directory (e.g., `README.md`, `docs/`, `CONTRIBUTING.md`).
+  - Summarize the key context you found (purpose, architecture, conventions, how to run/test) in 3–6 bullets.
+  - Only then propose the implementation plan.
+
+## Implementation Hygiene
+- When you do write code, include:
+  - file paths to be modified,
+  - a minimal set of changes aligned to the chosen plan,
+  - how to run relevant tests/lints (or what is missing if not available).
+- Prefer backwards-compatible changes unless breaking changes are explicitly approved.
+
+## Default Output Expectations
+When responding to feature work, use this order:
+1) Clarifying questions (if needed)
+2) Options + pros/cons (if non-trivial)
+3) Recommended approach + acceptance criteria
+4) Implementation plan (steps and touched files)
+5) Then code changes (only after plan agreement or explicit instruction)
+
+
+
+
+
+
+
+
+

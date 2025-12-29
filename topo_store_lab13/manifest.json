@@ -1,0 +1,73 @@
+{
+  "docx_path": "/Users/baoliliu/Downloads/networking-agent/RAG-Agent/data/实验13：子网划分（详细版）.docx",
+  "persist_dir": "topo_store_lab13",
+  "vision_model": "gpt-5-mini",
+  "embedding_model": "text-embedding-3-small",
+  "topologies": [
+    {
+      "topo_id": "topo_000",
+      "image_path": "topo_store_lab13/images/7eb2c50cf6ff8ec716956202a0ffb5cd786e7903.png",
+      "json_path": "topo_store_lab13/topology_json/topo_000.json",
+      "graph_path": "topo_store_lab13/graphs/topo_000.graph.json",
+      "n_facts": 13,
+      "warnings": [
+        "图中多处IP地址和掩码不可读或为占位符：Vlan 接口上显示为 \"192.168.?.1/?\"，第三段和掩码都不可见，已将这些接口的IP和掩码置为 null。",
+        "PC 上显示的“首地址: 192.168.?.10”可见末位为 .10，但第三段不可见，未填写具体IP（已置为 null）。",
+        "SW1 与 PCc 之间的物理端口标注不清晰，SW1 侧接口未能可靠辨认，接口字段留空；如需精确端口请提供更高清图或文字说明。",
+        "右上角表格显示网络 192.168.112.0 及各部门地址需求，但掩码/子网划分未明确，已将该子网标为 \"192.168.112.0/?\" 并未分配具体成员。",
+        "交换机端口到 VLAN 的映射部分可见提示（例如 SW1: Vlan4 -> 7-8；SW2: Vlan2 -> 3-4, Vlan3 -> 5-6；SW3: Vlan5 -> 5-6），但图中端口与具体子网/VLAN IP 的对应关系不完全清楚，未在接口字段中做进一步假设。"
+      ]
+    },
+    {
+      "topo_id": "topo_001",
+      "image_path": "topo_store_lab13/images/9a9dfa3cb11d982657eaaab1ea25a9b5e5a8a05f.png",
+      "json_path": "topo_store_lab13/topology_json/topo_001.json",
+      "graph_path": null,
+      "n_facts": 0,
+      "warnings": [
+        "输入图像为网络命令/配置参考表（包含 System-view、Interface loopback、IP address、Interface Ethernet、Port link-type、Port trunk permit VLAN、IP route-static 等命令），而非网络拓扑图。",
+        "图中未包含任何可识别的设备名称、接口标识、链路连接、IP 地址或子网信息；因此无法提取具体拓扑、接口或地址信息，按要求未臆造任何数据。",
+        "解析结果为空（无 devices/links），可能不是拓扑图或标签不可读；已跳过入库。"
+      ]
+    },
+    {
+      "topo_id": "topo_002",
+      "image_path": "topo_store_lab13/images/c5acda6a753ae08b2426bd8504730043a92448ef.png",
+      "json_path": "topo_store_lab13/topology_json/topo_002.json",
+      "graph_path": null,
+      "n_facts": 0,
+      "warnings": [
+        "图片内容不是网络拓扑图，只有表格内的文本（可见字符片段：\"preference-value ] [ tag tag-value ] [ descrIPtion descrIPtion-text ]\"），没有设备、连线或 IP 信息可供解析。",
+        "无法识别任何设备、接口、链路、IP、掩码、VLAN 或子网信息；已按要求将对应字段留空。",
+        "若需提取网络拓扑信息，请提供包含设备图标和连线的清晰拓扑图。",
+        "解析结果为空（无 devices/links），可能不是拓扑图或标签不可读；已跳过入库。"
+      ]
+    },
+    {
+      "topo_id": "topo_003",
+      "image_path": "topo_store_lab13/images/86c5bd4a21b89ec309a091fdb3f9640f012d078a.png",
+      "json_path": "topo_store_lab13/topology_json/topo_003.json",
+      "graph_path": "topo_store_lab13/graphs/topo_003.graph.json",
+      "n_facts": 17,
+      "warnings": [
+        "图中多数 PC 的具体 IP/掩码不可读，已留空（如 PCa/PCb/PCc/PCd 的首地址与末地址未填写）。",
+        "RT1 E0/0 标注为 \"172.16.2.2\"，RT1 E0/1 标注为 \"172.16.2.1\"。掩码在图中模糊，但看起来为 /24，已按 255.255.255.0 填写；若掩码不为 /24 请修正。",
+        "图中关于 VLAN 对应的子网（Vlan interface1/2/3/4 的具体 172.16.x.x/掩码）无法完全辨认，故未将这些子网加入 subnets 列表。仅根据可见文字将 SW2 的端口 (E1/0/3->Vlan2, E1/0/5->Vlan3) 与 SW1 的端口 (E1/0/7->Vlan4) 标注了 VLAN id，其余 VLAN->端口 映射可能存在遗漏或误读。",
+        "右上角表格（172.16.20.0 起始的地址分配、各部门所需主机数等）在图中可见但信息不完整，未用作明确子网分配。若需要基于该表生成细分子网，请提供清晰的表格或数值。",
+        "接口编号与连线关系是基于图中可见标注推断的（例如 SW1 E1/0/2 <-> SW2 E1/0/1 为 Trunk）。若原图有更精确的端口编号或不同连线，请提供以便修正。",
+        "未对可能的逻辑 VLAN 接口（SVI）填写 IP（图中 Vlan interface1/2/3/4 的具体地址模糊），因此子网成员信息不完整。"
+      ]
+    },
+    {
+      "topo_id": "topo_004",
+      "image_path": "topo_store_lab13/images/285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.png",
+      "json_path": "topo_store_lab13/topology_json/topo_004.json",
+      "graph_path": null,
+      "n_facts": 0,
+      "warnings": [
+        "OpenAI解析失败: APIConnectionError('Connection error.')",
+        "解析结果为空（无 devices/links），可能不是拓扑图或标签不可读；已跳过入库。"
+      ]
+    }
+  ]
+}

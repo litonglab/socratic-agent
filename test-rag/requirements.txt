@@ -1,0 +1,7 @@
+python-docx
+chromadb
+rank_bm25
+tiktoken
+openai
+jieba
+

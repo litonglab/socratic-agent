@@ -1,0 +1,11 @@
+{
+  "devices": [],
+  "interfaces": [],
+  "links": [],
+  "subnets": [],
+  "warnings": [
+    "输入图像为网络命令/配置参考表（包含 System-view、Interface loopback、IP address、Interface Ethernet、Port link-type、Port trunk permit VLAN、IP route-static 等命令），而非网络拓扑图。",
+    "图中未包含任何可识别的设备名称、接口标识、链路连接、IP 地址或子网信息；因此无法提取具体拓扑、接口或地址信息，按要求未臆造任何数据。",
+    "解析结果为空（无 devices/links），可能不是拓扑图或标签不可读；已跳过入库。"
+  ]
+}

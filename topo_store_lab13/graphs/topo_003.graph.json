@@ -1,0 +1,168 @@
+{
+  "directed": false,
+  "multigraph": false,
+  "graph": {},
+  "nodes": [
+    {
+      "type": "router",
+      "mgmt_ip": "10.10.10.10",
+      "id": "RT1"
+    },
+    {
+      "type": "switch",
+      "mgmt_ip": null,
+      "id": "SW1"
+    },
+    {
+      "type": "switch",
+      "mgmt_ip": null,
+      "id": "SW2"
+    },
+    {
+      "type": "switch",
+      "mgmt_ip": null,
+      "id": "SW3"
+    },
+    {
+      "type": "host",
+      "mgmt_ip": null,
+      "id": "PCa"
+    },
+    {
+      "type": "host",
+      "mgmt_ip": null,
+      "id": "PCb"
+    },
+    {
+      "type": "host",
+      "mgmt_ip": null,
+      "id": "PCc"
+    },
+    {
+      "type": "host",
+      "mgmt_ip": null,
+      "id": "PCd"
+    }
+  ],
+  "edges": [
+    {
+      "medium": "ethernet",
+      "a_if": "E0/0",
+      "a_if_attrs": {
+        "ip": "172.16.2.2",
+        "mask": "255.255.255.0",
+        "vlan": null
+      },
+      "b_if": "E1/0/1",
+      "b_if_attrs": {
+        "ip": null,
+        "mask": null,
+        "vlan": null
+      },
+      "source": "RT1",
+      "target": "SW1"
+    },
+    {
+      "medium": "ethernet",
+      "a_if": "E0/1",
+      "a_if_attrs": {
+        "ip": "172.16.2.1",
+        "mask": "255.255.255.0",
+        "vlan": null
+      },
+      "b_if": "E1/0/1",
+      "b_if_attrs": {
+        "ip": null,
+        "mask": null,
+        "vlan": null
+      },
+      "source": "RT1",
+      "target": "SW3"
+    },
+    {
+      "medium": "trunk",
+      "a_if": "E1/0/2",
+      "a_if_attrs": {
+        "ip": null,
+        "mask": null,
+        "vlan": null
+      },
+      "b_if": "E1/0/1",
+      "b_if_attrs": {
+        "ip": null,
+        "mask": null,
+        "vlan": null
+      },
+      "source": "SW1",
+      "target": "SW2"
+    },
+    {
+      "medium": "ethernet",
+      "a_if": "E1/0/7",
+      "a_if_attrs": {
+        "ip": null,
+        "mask": null,
+        "vlan": "4"
+      },
+      "b_if": "eth0",
+      "b_if_attrs": {
+        "ip": null,
+        "mask": null,
+        "vlan": null
+      },
+      "source": "SW1",
+      "target": "PCc"
+    },
+    {
+      "medium": "ethernet",
+      "a_if": "E1/0/3",
+      "a_if_attrs": {
+        "ip": null,
+        "mask": null,
+        "vlan": "2"
+      },
+      "b_if": "eth0",
+      "b_if_attrs": {
+        "ip": null,
+        "mask": null,
+        "vlan": null
+      },
+      "source": "SW2",
+      "target": "PCa"
+    },
+    {
+      "medium": "ethernet",
+      "a_if": "E1/0/5",
+      "a_if_attrs": {
+        "ip": null,
+        "mask": null,
+        "vlan": "3"
+      },
+      "b_if": "eth0",
+      "b_if_attrs": {
+        "ip": null,
+        "mask": null,
+        "vlan": null
+      },
+      "source": "SW2",
+      "target": "PCb"
+    },
+    {
+      "medium": "ethernet",
+      "a_if": "E1/0/6",
+      "a_if_attrs": {
+        "ip": null,
+        "mask": null,
+        "vlan": null
+      },
+      "b_if": "eth0",
+      "b_if_attrs": {
+        "ip": null,
+        "mask": null,
+        "vlan": null
+      },
+      "source": "SW3",
+      "target": "PCd"
+    }
+  ]
+}
