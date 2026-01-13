@@ -35,12 +35,29 @@ class Device(BaseModel):
     type: str = Field(default="unknown", description="router/switch/host/firewall/server/unknown")
     mgmt_ip: Optional[str] = None
 
+
+# [PATCH-1] 修改 Interface 类
 class Interface(BaseModel):
     device: str
-    name: str
+    name: Optional[str] = None  # 原来是 str，建议允许 None（PC 网卡常无端口名）
+
+    # 新增：接口类别
+    kind: str = Field(default="unknown", description="physical | svi | host_nic | unknown")
+
+    # 新增：二层端口属性（可选）
+    mode: Optional[str] = Field(default=None, description="access | trunk | unknown")
+    allowed_vlans: Optional[str] = Field(default=None, description="e.g., '5-6' or '7,8'")
+    access_vlan: Optional[str] = Field(default=None, description="e.g., '5'")
+
+    # 原字段
     ip: Optional[str] = None
     mask: Optional[str] = None
     vlan: Optional[str] = None
+
+    # 你之前加的 raw（保留）
+    ip_raw: Optional[str] = None
+    mask_raw: Optional[str] = None
+    vlan_raw: Optional[str] = None
 
 class LinkEnd(BaseModel):
     device: str
@@ -56,6 +73,9 @@ class Subnet(BaseModel):
     members: List[LinkEnd] = Field(default_factory=list)
 
 class TopologyExtraction(BaseModel):
+    # [MOD-1] 用于缓存版本控制：旧缓存无该字段 -> 触发重解析
+    schema_version: int = 2
+
     devices: List[Device] = Field(default_factory=list)
     interfaces: List[Interface] = Field(default_factory=list)
     links: List[Link] = Field(default_factory=list)
@@ -144,6 +164,9 @@ SYSTEM_TOPO = """你是计算机网络实验拓扑图解析器。
 2) 设备命名尽量沿用图中标注（如 R1/SW1/PC1）。
 3) 接口名/端口号看不清可留空；但链路“设备-设备”关系尽量保留。
 4) 只输出结构化内容，不输出额外解释性文本。
+5) 若图中字段包含问号'?'或任意不确定字符：必须原样写入 *_raw 字段（例如 ip_raw="192.168.?.1"），并将规范字段（ip/mask/vlan）设为 null。
+6) 严禁将'?'解释为任何数字（例如2），严禁基于经验补全缺失数字。
+7) “物理接口如 E1/0/1、GE0/0/1 填 kind=physical；Vlan2/Vlanif2 填 kind=svi；PC 端若无接口名填 kind=host_nic。”
 """
 
 USER_TOPO = """请解析这张网络拓扑图，输出设备、接口、链路、IP/掩码/VLAN/子网信息。"""
@@ -193,6 +216,60 @@ def _extract_topology_from_image_openai(image_path: str, vision_model: str = "gp
     )
     return resp.output_parsed
 
+# [PATCH-2] 新增：接口分类 + 端口属性归一
+_PHY_RE = re.compile(r"^(?:E|GE|G|Gi|Fa|Eth)\d+/\d+/\d+$", re.IGNORECASE)
+_SVI_RE = re.compile(r"^(?:Vlanif|Vlan)\d+$", re.IGNORECASE)
+_PC_RE  = re.compile(r"^PC", re.IGNORECASE)
+
+def _classify_interface(itf: Interface) -> None:
+    n = (itf.name or "").strip()
+
+    # 主机网卡：PCa/PCb 这类一般没有端口名
+    if _PC_RE.match(itf.device) and not n:
+        itf.kind = "host_nic"
+        return
+
+    # VLAN 三层接口（SVI）
+    if _SVI_RE.match(n):
+        itf.kind = "svi"
+        return
+
+    # 物理口
+    if _PHY_RE.match(n):
+        itf.kind = "physical"
+        return
+
+    itf.kind = itf.kind or "unknown"
+
+
+def _postprocess_topology_for_kind(topo: TopologyExtraction) -> TopologyExtraction:
+    """
+    让数据前后对应：
+    - 自动把 Interface 分成 physical/svi/host_nic
+    - 如果某接口 vlan_raw 像 '5-6'，优先放到 allowed_vlans（对物理口更有意义）
+    """
+    for itf in topo.interfaces:
+        _classify_interface(itf)
+
+        # 如果模型把 "Vlan5: 5-6" 塞进 vlan_raw，这对物理口更像 allowed_vlans
+        if itf.kind == "physical" and itf.vlan_raw and re.fullmatch(r"\d+(-\d+)?", itf.vlan_raw.strip()):
+            itf.allowed_vlans = itf.vlan_raw.strip()
+
+    # 也可以利用 links.medium=trunk 推断端口 mode（可选但很实用）
+    trunk_ports = set()
+    for lk in topo.links:
+        if (lk.medium or "").lower() == "trunk":
+            if lk.a.interface:
+                trunk_ports.add((lk.a.device, lk.a.interface))
+            if lk.b.interface:
+                trunk_ports.add((lk.b.device, lk.b.interface))
+
+    for itf in topo.interfaces:
+        if itf.kind == "physical" and itf.name and (itf.device, itf.name) in trunk_ports:
+            itf.mode = itf.mode or "trunk"
+
+    return topo
+
 
 # =========================
 # 4) Build graph + facts
@@ -206,11 +283,18 @@ def _build_nx_graph(topo: TopologyExtraction) -> nx.Graph:
 
     iface_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for itf in topo.interfaces:
-        if itf.device and itf.name:
+        if itf.kind == "physical" and itf.device and itf.name:
             iface_map[(itf.device, itf.name)] = {
                 "ip": itf.ip,
                 "mask": itf.mask,
                 "vlan": itf.vlan,
+                "ip_raw": itf.ip_raw,
+                "mask_raw": itf.mask_raw,
+                "vlan_raw": itf.vlan_raw,
+                "mode": itf.mode,
+                "allowed_vlans": itf.allowed_vlans,
+                "access_vlan": itf.access_vlan,
+                "kind": itf.kind,
             }
 
     for lk in topo.links:
@@ -244,10 +328,38 @@ def _topology_facts(G: nx.Graph) -> List[str]:
         )
         a = (attrs.get("a_if_attrs") or {})
         b = (attrs.get("b_if_attrs") or {})
-        if attrs.get("a_if") and a.get("ip"):
-            facts.append(f"INTERFACE {u}.{attrs.get('a_if')} ip={a.get('ip')} mask={a.get('mask')} vlan={a.get('vlan')}")
-        if attrs.get("b_if") and b.get("ip"):
-            facts.append(f"INTERFACE {v}.{attrs.get('b_if')} ip={b.get('ip')} mask={b.get('mask')} vlan={b.get('vlan')}")
+        # [MOD-5] ip 为 None 也允许输出 ip_raw，便于 agent 发现“这里不确定”
+        if attrs.get("a_if") and (a.get("ip") is not None or a.get("ip_raw")):
+            facts.append(
+                f"INTERFACE {u}.{attrs.get('a_if')} ip={a.get('ip')} ip_raw={a.get('ip_raw')} "
+                f"mask={a.get('mask')} mask_raw={a.get('mask_raw')} vlan={a.get('vlan')} vlan_raw={a.get('vlan_raw')}"
+            )
+
+        if attrs.get("b_if") and (b.get("ip") is not None or b.get("ip_raw")):
+            facts.append(
+                f"INTERFACE {v}.{attrs.get('b_if')} ip={b.get('ip')} ip_raw={b.get('ip_raw')} "
+                f"mask={b.get('mask')} mask_raw={b.get('mask_raw')} vlan={b.get('vlan')} vlan_raw={b.get('vlan_raw')}"
+            )
+
+    # 关键新增：把 SVI / HOST_NIC 也输出（否则你检索不到 VLANIF 地址信息）
+    for itf in topo.interfaces:
+        if itf.kind == "svi":
+            facts.append(
+                f"SVI {itf.device}.{itf.name} ip={itf.ip} ip_raw={itf.ip_raw} mask={itf.mask} mask_raw={itf.mask_raw}"
+            )
+        elif itf.kind == "host_nic":
+            facts.append(
+                f"HOST_NIC {itf.device} ip={itf.ip} ip_raw={itf.ip_raw}"
+            )
+        elif itf.kind == "physical":
+            # 若物理口有额外 vlan 映射信息（如 allowed_vlans），也输出
+            if itf.mode or itf.allowed_vlans or itf.access_vlan:
+                facts.append(
+                    f"PHY_PORT {itf.device}.{itf.name} mode={itf.mode} allowed_vlans={itf.allowed_vlans} access_vlan={itf.access_vlan}"
+                )
+
+    for sn in topo.subnets:
+        facts.append(f"SUBNET cidr={sn.cidr}")
     return facts
 
 
@@ -340,21 +452,46 @@ def BuildTopoIndexFromDocxImages(
         "topologies": [],  # list of {topo_id, image_path, json_path, graph_path, n_facts, warnings}
     }
 
-    for idx, img_path in enumerate(tqdm(images, desc="Parsing topology images")):
-        topo_id = f"topo_{idx:03d}"
+    for img_path in tqdm(images, desc="Parsing topology images"):
+        img_p = Path(img_path)
+        digest = img_p.stem
+        topo_id = f"topo_{digest}"
 
-        try:
-            topo = _extract_topology_from_image_openai(img_path, vision_model=vision_model)
-        except Exception as e:
-            # 解析失败也写 manifest，方便你排查
-            topo = TopologyExtraction(warnings=[f"OpenAI解析失败: {repr(e)}"])
+        json_path = topo_json_dir / f"{topo_id}.json"
+        graph_path = graphs_dir / f"{topo_id}.graph.json"
+
+        topo = None
+        old_cache = False  # [MOD-4]
+
+        # 尝试从本地 JSON 缓存加载解析结果
+        if json_path.exists():
+            try:
+                topo_data = json.loads(json_path.read_text(encoding="utf-8"))
+                # [MOD-4] 旧缓存没有 schema_version（也就没有 raw 字段），直接判为旧缓存，强制重解析
+                if "schema_version" not in topo_data:
+                    old_cache = True
+                else:
+                    topo = TopologyExtraction.model_validate(topo_data)
+            except Exception:
+                topo = None
+
+        # [MOD-4] topo 为空 或 旧缓存 -> 重解析
+        if topo is None or old_cache:
+            try:
+                topo = _extract_topology_from_image_openai(img_path, vision_model=vision_model)
+            except Exception as e:
+                topo = TopologyExtraction(warnings=[f"OpenAI解析失败: {repr(e)}"])
+
+        # [MOD-4] 入库前统一做 postprocess（非常关键）
+        # [PATCH-3] 在你拿到 topo 后（无论来自缓存还是模型），统一做分类后处理
+        topo = _postprocess_topology_for_kind(topo)
 
         # 若没有提取到任何设备/链路，可以选择跳过（避免污染索引）
         if (not topo.devices) and (not topo.links):
             topo.warnings.append("解析结果为空（无 devices/links），可能不是拓扑图或标签不可读；已跳过入库。")
             # 仍然落盘 JSON，便于你复核
-            json_path = topo_json_dir / f"{topo_id}.json"
-            json_path.write_text(json.dumps(topo.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+            if not json_path.exists():
+                json_path.write_text(json.dumps(topo.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
 
             manifest["topologies"].append(
                 {
@@ -370,14 +507,14 @@ def BuildTopoIndexFromDocxImages(
 
         # 3) topo -> graph + facts
         G = _build_nx_graph(topo)
-        facts = _topology_facts(G)
+        facts = _topology_facts(G, topo)
 
         # 4) 落盘 topo json + graph json
-        json_path = topo_json_dir / f"{topo_id}.json"
-        json_path.write_text(json.dumps(topo.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+        if not json_path.exists():
+            json_path.write_text(json.dumps(topo.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
 
-        graph_path = graphs_dir / f"{topo_id}.graph.json"
-        graph_path.write_text(json.dumps(json_graph.node_link_data(G), ensure_ascii=False, indent=2), encoding="utf-8")
+        if not graph_path.exists():
+            graph_path.write_text(json.dumps(json_graph.node_link_data(G), ensure_ascii=False, indent=2), encoding="utf-8")
 
         # 5) facts -> Documents
         for f in facts:
@@ -542,7 +679,38 @@ def LoadTopoRetriever(
 
 
 # =========================
-# 7) Optional: one-call wrapper (build + load)
+# 7) Default Global Retriever for agent.py
+# =========================
+
+_GLOBAL_TOPO_RETRIEVER = None
+
+def TopoRetriever(query: str) -> str:
+    """
+    提供给 agent.py 使用的全局拓扑检索函数。
+    第一次调用时会自动加载 topo_store_lab13 索引。
+    返回拼好的 context 字符串。
+    """
+    global _GLOBAL_TOPO_RETRIEVER
+    if _GLOBAL_TOPO_RETRIEVER is None:
+        persist_dir = "topo_store_lab13"
+        if not os.path.exists(persist_dir):
+            # 如果目录不存在，尝试构建一个默认的（可选，根据实际情况决定）
+            # 这里先打印错误并抛出异常，或者你可以选择自动 Build
+            print(f"[Warning] 拓扑索引目录 {persist_dir} 不存在，请先运行 BuildTopoIndexFromDocxImages")
+            # 为防止崩溃，尝试返回空或者加载
+            try:
+                _GLOBAL_TOPO_RETRIEVER = LoadTopoRetriever(persist_dir)
+            except Exception as e:
+                return f"拓扑索引加载失败: {e}"
+        else:
+            _GLOBAL_TOPO_RETRIEVER = LoadTopoRetriever(persist_dir)
+            
+    result = _GLOBAL_TOPO_RETRIEVER(query)
+    return result["context"]
+
+
+# =========================
+# 8) Optional: one-call wrapper (build + load)
 # =========================
 
 def BuildAndLoadTopoRetrieverFromDocxImages(
@@ -571,11 +739,15 @@ def BuildAndLoadTopoRetrieverFromDocxImages(
     )
     return out_dir, retr
 
-out_dir = BuildTopoIndexFromDocxImages(
-    docx_path="/Users/baoliliu/Downloads/networking-agent/RAG-Agent/data/实验13：子网划分（详细版）.docx",
-    persist_dir="topo_store_lab13",
-    vision_model="gpt-5-mini",
-    embedding_model="text-embedding-3-small",
-    overwrite=True,
-)
-print("Topo index saved to:", out_dir)
+if __name__ == "__main__":
+    # 仅在直接运行此脚本时执行构建
+    # 将 overwrite 改为 False，以利用我们新增的颗粒度缓存
+    out_dir = BuildTopoIndexFromDocxImages(
+        docx_path="/Users/baoliliu/Downloads/networking-agent/RAG-Agent/data/实验13：子网划分（详细版）.docx",
+        persist_dir="topo_store_lab13",
+        vision_model="gpt-4o",  # 使用可用的视觉模型，避免无效模型导致空解析
+        embedding_model="text-embedding-3-small",
+        overwrite=True,
+        min_image_pixels=64 * 64,
+    )
+    print("Topo index saved to:", out_dir)

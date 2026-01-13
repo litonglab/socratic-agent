@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "devices": [],
+  "interfaces": [],
+  "links": [],
+  "subnets": [],
+  "warnings": [
+    "No network devices or topology elements detected in the provided image. The image appears to show a blank table or template with placeholder text ('preference-value', 'tag', 'tag-value', 'descrIPtion-text') rather than a network diagram.",
+    "No interface names, IP addresses, masks, VLANs, or explicit device-to-device links are present or legible in the image; therefore those fields are omitted.",
+    "If this is not the intended diagram, please upload a clearer topology image containing device labels, interface names, and link indications.",
+    "解析结果为空（无 devices/links），可能不是拓扑图或标签不可读；已跳过入库。"
+  ]
+}

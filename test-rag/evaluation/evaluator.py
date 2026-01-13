@@ -96,3 +96,5 @@ class RAGEvaluator:
             "average_faithfulness": avg_faithfulness,
         }
 
+
+

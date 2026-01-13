@@ -1,18 +1,14 @@
 from pydantic import BaseModel
-from langchain.chains import RetrievalQA
-from langchain_openai import ChatOpenAI
+from tqdm import tqdm
+
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings
-#from dotenv import load_dotenv, find_dotenv
-from langchain_community.document_loaders import TextLoader
+from langchain_community.document_loaders import TextLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.prompts import ChatPromptTemplate
-#from starlette.middleware.cors import CORSMiddleware
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import Docx2txtLoader
-from tqdm import tqdm
-from langchain_community.vectorstores import FAISS
-from tqdm import tqdm
+from langchain_core.prompts import ChatPromptTemplate
+
+from langchain_classic.chains import RetrievalQA
+
 
 # 加载环境变量，读取本地 .env 文件，里面定义了 OPENAI_API_KEY
 #_ = load_dotenv(find_dotenv())
@@ -126,7 +122,7 @@ qa_chain = RetrievalQA.from_chain_type(
 
 
 def RAGAgent(message):
-    answer = qa_chain.run(message)
+    answer = qa_chain.invoke(message)
     return answer
 
 

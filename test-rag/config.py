@@ -37,3 +37,5 @@ class Config:
         os.makedirs(Config.INDEX_STORE_DIR, exist_ok=True)
         os.makedirs(Config.CHROMA_DB_DIR, exist_ok=True)
 
+
+

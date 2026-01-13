@@ -1,11 +1,16 @@
 from email import message
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage, AIMessage
-from rag import RAGAgent
-from topo_rag import TopoRetriever
+import json
 import re
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
-from typing import TypedDict, List, Dict, Any, Optional
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+
+from agentic_rag.rag import RAGAgent
+from agentic_rag.topo_rag import TopoRetriever
+from dataclasses import dataclass, field
+from agentic_rag.utils import extract_excerpt, _coerce_to_text
+from agentic_rag.socratic.ping_controller import handle_ping_socratic
 
 class Evidence(TypedDict):
     id: str
@@ -25,37 +30,21 @@ KEYWORDS = [
     "show", "display", "ping", "traceroute", "邻居", "路由表"
 ]
 
-def extract_excerpt(raw: str, max_len: int = 180) -> str:
-    if not raw:
-        return ""
-    # 按句子/行切分
-    parts = re.split(r"[。\n\r]+", raw)
-    parts = [p.strip() for p in parts if p.strip()]
 
-    # 优先选包含关键词的句子
-    scored = []
-    for p in parts:
-        score = sum(1 for k in KEYWORDS if k.lower() in p.lower())
-        scored.append((score, p))
-    scored.sort(key=lambda x: x[0], reverse=True)
-
-    best = scored[0][1] if scored else raw.strip()
-    if len(best) > max_len:
-        best = best[:max_len].rstrip() + "…"
-    return best
 
 def call_rag_and_record(state: AgentState, query: str) -> str:
     raw = RAGAgent(query)  # 保持签名不变
+    raw_text = _coerce_to_text(raw)
     evidences = state.get("evidences", [])
     eid = f"E{len(evidences) + 1}"
     evidences.append({
         "id": eid,
         "query": query,
         "excerpt": extract_excerpt(raw),
-        "raw_text": raw
+        "raw_text": raw_text
     })
     state["evidences"] = evidences
-    return raw
+    return raw_text
 
 def retrieve_evidence_node(state: AgentState) -> AgentState:
     user_msg = state["user_message"]
@@ -93,7 +82,7 @@ class Agent():
         return result,history
 
     def execute(self):
-        response = client(self.messages)
+        response = client.invoke(self.messages)
         return response.content
 
 known_actions={
@@ -144,33 +133,120 @@ PROMPT="""
 
 
 # """
-action_re = re.compile( '^工具：(\w+)：(.*)$' ) 
-def query(question,history=[], max_turns=5): 
-    i =  0 
-    bot = Agent(PROMPT,history) 
-    next_prompt = question 
-    while  i < max_turns: 
-        i +=  1 
-        result,history = bot(next_prompt,history) 
-        print(1,result) 
-        actions = [ 
-            action_re.match(a)  
-            for  a  in  result.split( '\n' )  
-            if  action_re.match(a) 
-        ] 
-        if  actions: 
-            # There is an action to run 
-            action, action_input = actions[ 0 ].groups() 
-            if  action  not in  known_actions: 
-                raise  Exception( "Unknown action: {}: {}" .format(action, action_input)) 
-            print( " -- running {} {}" .format(action, action_input)) 
-            observation = known_actions[action](action_input) 
-            print( "检索结果：" , observation) 
-            next_prompt =  "检索结果：{}" .format(observation) 
-        else : 
-            return  result,history
+action_re = re.compile(r'^工具：(\w+)：(.*)$')
+
+def query(
+    question: str,
+    history: Optional[List[BaseMessage]] = None,
+    max_turns: int = 5,
+    debug: bool = False,
+    state: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, List[BaseMessage], List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Return: (reply_text, new_history_messages, tool_traces, new_state)
+
+    - tool_traces: for frontend debug panel
+    - new_state: per-session socratic state (saved by server.py)
+    """
+    if history is None:
+        history = []
+
+    # -----------------------------
+    # [ADD] Intent routing: ping scenario -> socratic controller
+    # -----------------------------
+    q = (question or "").strip()
+    q_low = q.lower()
+
+    # 一个实用的 ping 触发条件：包含 ping 或 “不通/连不通/超时/不可达”等
+    ping_trigger = (
+        ("ping" in q_low)
+        or ("不通" in q)
+        or ("连不通" in q)
+        or ("超时" in q)
+        or ("不可达" in q)
+        or ("unreachable" in q_low)
+        or ("timed out" in q_low)
+    )
+
+    if ping_trigger:
+        reply, history, tool_traces, new_state = handle_ping_socratic(
+            user_message=q,
+            history=history,
+            state_dict=state,
+        )
+        return reply, history, tool_traces, (new_state or {})
+
+    # -----------------------------
+    # Default: your original tool-loop agent
+    # -----------------------------
+    i = 0
+    bot = Agent(PROMPT, history)
+    next_prompt = q
+    tool_traces: List[Dict[str, Any]] = []
+
+    while i < max_turns:
+        i += 1
+        result, history = bot(next_prompt, history)
+
+        if debug:
+            print(i, result)
+
+        actions = [
+            action_re.match(a)
+            for a in (result or "").split("\n")
+            if action_re.match(a)
+        ]
+
+        if actions:
+            action, action_input = actions[0].groups()
+            if action not in known_actions:
+                raise Exception(f"Unknown action: {action}: {action_input}")
+
+            observation = known_actions[action](action_input)
+
+            # 工具返回值可能是字符串或字典，展示/日志层统一转成可读文本
+            obs_output_str = _coerce_to_text(observation)
+
+            tool_traces.append({
+                "tool": action,
+                "input": action_input,
+                "output": obs_output_str[:2000],
+            })
+
+            next_prompt = f"检索结果：{obs_output_str}"
+            continue
+
+        # 没有工具调用，直接返回最终输出
+        return result, history, tool_traces, (state or {})
+
+    # 超过 max_turns 兜底返回（仍然返回 4 元组）
+    return result, history, tool_traces, (state or {})
 
 
+
+def messages_to_dicts(messages: List[BaseMessage]) -> List[Dict[str, str]]:
+    out = []
+    for m in messages:
+        role = "user"
+        if isinstance(m, AIMessage):
+            role = "assistant"
+        elif isinstance(m, SystemMessage):
+            role = "system"
+        out.append({"role": role, "content": m.content})
+    return out
+
+def dicts_to_messages(items: List[Dict[str, str]]) -> List[BaseMessage]:
+    out: List[BaseMessage] = []
+    for it in items:
+        role = it.get("role")
+        content = it.get("content", "")
+        if role == "assistant":
+            out.append(AIMessage(content=content))
+        elif role == "system":
+            out.append(SystemMessage(content=content))
+        else:
+            out.append(HumanMessage(content=content))
+    return out
 
 setting="""
 你是“计算机网络实验课 AI 助教系统”的核心智能体，目标是通过“证据驱动的 RAG + 苏格拉底式引导”帮助学生完成实验理解与故障排查。你必须优先保证：证据准确、过程可追溯、教学不越界、结论可执行。
@@ -268,9 +344,11 @@ Step 5：评估用户回复并迭代
 
 开始工作时，先执行 Step 0～Step 2，然后按“输出格式”给出本轮结果。
 """
-message="我对制作网线办法感到困惑"
-output,history=query(message)
-print(output)
-message1="那我该怎么制作网线呢"
-output1,history1=query(message1,history)
-print(output1)
+
+if __name__ == "__main__":
+    message="我对子网划分感到困惑"
+    output,history=query(message)
+    print(output)
+    message1="那我该怎么子网划分IP地址呢"
+    output1,history1=query(message1,history)
+    print(output1)
