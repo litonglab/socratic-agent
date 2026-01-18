@@ -8,11 +8,12 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
-from langchain_openai import ChatOpenAI
+from langchain_deepseek import ChatDeepSeek
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from agentic_rag.rag import RAGAgent  # 你项目里实际路径如不同请改
 from agentic_rag.utils import extract_excerpt, _coerce_to_text
+from agentic_rag.llm_config import build_chat_llm
 
 
 IP_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
@@ -33,12 +34,12 @@ class PingSlotExtraction(BaseModel):
     ping_dst_result: Optional[str] = Field(default=None, description="Ping output to destination (truncate <=800 chars)")
 
 # [MOD] 新增：懒加载 LLM（避免 import 时初始化）
-_SLOT_LLM: Optional[ChatOpenAI] = None
-def _get_slot_llm() -> ChatOpenAI:
+_SLOT_LLM: Optional[ChatDeepSeek] = None
+def _get_slot_llm() -> ChatDeepSeek:
     global _SLOT_LLM
     if _SLOT_LLM is None:
-        # 你可以按成本/效果调整模型，例如 gpt-4o-mini / gpt-5-mini
-        _SLOT_LLM = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        # _SLOT_LLM = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        _SLOT_LLM = build_chat_llm(temperature=0)
     return _SLOT_LLM
 
 # [MOD] 新增：从 LLM 输出中提取 JSON（容错）

@@ -3,7 +3,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
-from langchain_openai import ChatOpenAI
+# from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from agentic_rag.rag import RAGAgent
@@ -11,6 +11,7 @@ from agentic_rag.topo_rag import TopoRetriever
 from dataclasses import dataclass, field
 from agentic_rag.utils import extract_excerpt, _coerce_to_text
 from agentic_rag.socratic.ping_controller import handle_ping_socratic
+from agentic_rag.llm_config import build_chat_llm
 
 class Evidence(TypedDict):
     id: str
@@ -60,7 +61,8 @@ def retrieve_evidence_node(state: AgentState) -> AgentState:
 
     return state
 
-client=ChatOpenAI(model="gpt-4o-mini", temperature=0)
+# client=ChatOpenAI(model="gpt-4o-mini", temperature=0)
+client = build_chat_llm(temperature=0)
 
 class Agent():
     def __init__(self, prompt,history):

@@ -20,3 +20,10 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+# Python bytecode / caches
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store

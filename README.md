@@ -134,3 +134,8 @@ RAG-Agent/
   }
 }
 
+## 5.启动方法
+启动后端:
+uvicorn server:app --reload --port 8000
+启动前端:
+streamlit run app_streamlit.py

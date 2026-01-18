@@ -1,20 +1,22 @@
 from pydantic import BaseModel
 from tqdm import tqdm
 
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+# from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import TextLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
 
 from langchain_classic.chains import RetrievalQA
-
+from agentic_rag.llm_config import build_chat_llm
 
 # 加载环境变量，读取本地 .env 文件，里面定义了 OPENAI_API_KEY
 #_ = load_dotenv(find_dotenv())
 
 # llm
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+# llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+llm = build_chat_llm(temperature=0)
 
 # 1. 加载docx文档
 loader = Docx2txtLoader("/Users/baoliliu/Downloads/networking-agent/RAG-Agent/data/实验1-网线配线架与机柜（2025版）.docx")
