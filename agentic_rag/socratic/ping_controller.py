@@ -1,16 +1,90 @@
 # agentic_rag/socratic/ping_controller.py
 from __future__ import annotations
 
+# [MOD] 新增：json / pydantic / LLM messages
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from pydantic import BaseModel, Field
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+
 from agentic_rag.rag import RAGAgent  # 你项目里实际路径如不同请改
-from agentic_rag.agent import extract_excerpt  # 若循环依赖，见下方“解耦建议”
-# 更推荐：把 extract_excerpt 放到 utils.py，再从 utils import extract_excerpt
+from agentic_rag.utils import extract_excerpt, _coerce_to_text
 
 
 IP_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
+
+# [MOD] 新增：更正关键词（触发允许覆盖）
+_CORRECTION_KEYWORDS = ("更正", "改成", "改为", "不是", "我写错了", "写错了", "正确是", "纠正")
+def _allow_overwrite_slots(text: str) -> bool:
+    t = text or ""
+    return any(k in t for k in _CORRECTION_KEYWORDS)
+
+# [MOD] 新增：LLM 槽位抽取结构
+class PingSlotExtraction(BaseModel):
+    src_ip: Optional[str] = Field(default=None, description="Source host IP, e.g. 192.168.1.10")
+    src_mask: Optional[str] = Field(default=None, description="Source host mask, e.g. 255.255.255.0 or /24")
+    src_gw: Optional[str] = Field(default=None, description="Source default gateway IP")
+    dst_ip: Optional[str] = Field(default=None, description="Destination host IP")
+    ping_gw_result: Optional[str] = Field(default=None, description="Ping output to gateway (truncate <=800 chars)")
+    ping_dst_result: Optional[str] = Field(default=None, description="Ping output to destination (truncate <=800 chars)")
+
+# [MOD] 新增：懒加载 LLM（避免 import 时初始化）
+_SLOT_LLM: Optional[ChatOpenAI] = None
+def _get_slot_llm() -> ChatOpenAI:
+    global _SLOT_LLM
+    if _SLOT_LLM is None:
+        # 你可以按成本/效果调整模型，例如 gpt-4o-mini / gpt-5-mini
+        _SLOT_LLM = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    return _SLOT_LLM
+
+# [MOD] 新增：从 LLM 输出中提取 JSON（容错）
+def _extract_json_object(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return "{}"
+    # 优先找第一段 {...}
+    start = s.find("{")
+    end = s.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return s[start:end + 1]
+    return "{}"
+
+# [MOD] 新增：LLM 槽位抽取（结构化）
+_SLOT_SYSTEM = """你是网络故障排查助手的“信息抽取器”。
+任务：从用户输入中抽取 ping 不通排查所需的槽位信息，并输出严格 JSON（只输出 JSON，不要输出任何额外文本）。
+槽位如下（可为空）：
+- src_ip: 源主机IP
+- src_mask: 源主机掩码（允许 255.255.255.0 或 /24）
+- src_gw: 源主机默认网关
+- dst_ip: 目标IP
+- ping_gw_result: ping 网关的原始输出（如存在，截断 <=800 字符）
+- ping_dst_result: ping 目标的原始输出（如存在，截断 <=800 字符）
+
+规则：
+1) 不要臆造。用户未提供则为 null。
+2) 如果文本里同时出现多段 ping 输出，尽量区分“ping 网关”和“ping 目标”；无法区分则优先填 ping_dst_result。
+3) 输出必须是单个 JSON object，key 只允许上述 6 个。
+"""
+
+def _llm_extract_ping_slots(text: str) -> Dict[str, Any]:
+    llm = _get_slot_llm()
+    try:
+        resp = llm.invoke([
+            SystemMessage(content=_SLOT_SYSTEM),
+            HumanMessage(content=f"用户输入：\n{text}")
+        ])
+        content = getattr(resp, "content", str(resp))
+        obj_text = _extract_json_object(content)
+        data = json.loads(obj_text)
+        parsed = PingSlotExtraction.model_validate(data).model_dump()
+        # 只返回非空字段
+        return {k: v for k, v in parsed.items() if v}
+    except Exception:
+        return {}
 
 
 @dataclass
@@ -80,8 +154,8 @@ SLOT_HINTS = {
     ],
 }
 
-
-def extract_ping_slots(text: str) -> Dict[str, Any]:
+# [MOD] 将原来的正则抽取逻辑保留为 fallback（不改变你原算法）
+def _regex_extract_ping_slots(text: str) -> Dict[str, Any]:
     s: Dict[str, Any] = {}
     ips = IP_RE.findall(text or "")
 
@@ -91,12 +165,18 @@ def extract_ping_slots(text: str) -> Dict[str, Any]:
             s.setdefault("dst_ip", ips[1])
 
     low = (text or "").lower()
-    # 粗略识别 ping 输出片段
     if ("reply from" in low) or ("bytes from" in low) or ("ttl=" in low) or ("timed out" in low) \
        or ("unreachable" in low) or ("请求超时" in (text or "")) or ("不可达" in (text or "")):
         s.setdefault("ping_dst_result", (text or "")[:800])
 
     return s
+
+# [MOD] extract_ping_slots：优先用 LLM 结构化抽取，失败再 fallback
+def extract_ping_slots(text: str) -> Dict[str, Any]:
+    llm_slots = _llm_extract_ping_slots(text)
+    if llm_slots:
+        return llm_slots
+    return _regex_extract_ping_slots(text)
 
 
 def need_slot(state: PingState) -> Optional[str]:
@@ -116,13 +196,14 @@ def ensure_ping_evidence(state: PingState) -> List[Dict[str, Any]]:
 
     q = "ping 不通 排查步骤 默认网关 二层 三层 路由表 ARP 常见原因"
     raw = RAGAgent(q)
+    raw_text = _coerce_to_text(raw)
     state.evidences.append({
         "id": "E1",
         "query": q,
         "excerpt": extract_excerpt(raw),
-        "raw_text": raw,
+        "raw_text": raw_text,
     })
-    return [{"tool": "检索", "input": q, "output": raw[:2000]}]
+    return [{"tool": "检索", "input": q, "output": raw_text[:2000]}]
 
 
 def format_ping_reply(state: PingState, missing_slot: Optional[str], final: bool) -> str:
@@ -165,11 +246,19 @@ def handle_ping_socratic(user_message: str, history, state_dict: Optional[Dict[s
     else:
         state = PingState()
 
-    # 抽槽位
+    # [MOD] 关键：如果用户在本轮表达“更正/改成/不是/我写错了/正确是”，允许覆盖 slot
+    allow_overwrite = _allow_overwrite_slots(user_message)
+
+    # 抽槽位（LLM 结构化优先）
     extracted = extract_ping_slots(user_message)
     for k, v in extracted.items():
-        if v and not state.slots.get(k):
-            state.slots[k] = v
+        if not v:
+            continue
+        if allow_overwrite:
+            state.slots[k] = v  # 覆盖
+        else:
+            if not state.slots.get(k):
+                state.slots[k] = v  # 仅填空
 
     tool_traces = []
     tool_traces += ensure_ping_evidence(state)
