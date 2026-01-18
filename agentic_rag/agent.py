@@ -1,16 +1,13 @@
 from email import message
-import json
-import re
-from typing import Any, Dict, List, Optional, Tuple, TypedDict
-
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 from agentic_rag.rag import RAGAgent
 from agentic_rag.topo_rag import TopoRetriever
-from dataclasses import dataclass, field
-from agentic_rag.utils import extract_excerpt, _coerce_to_text
-from agentic_rag.socratic.ping_controller import handle_ping_socratic
+import re
+
+from typing import TypedDict, List, Dict, Any, Optional, Tuple
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 
 class Evidence(TypedDict):
     id: str
@@ -30,21 +27,37 @@ KEYWORDS = [
     "show", "display", "ping", "traceroute", "邻居", "路由表"
 ]
 
+def extract_excerpt(raw: str, max_len: int = 180) -> str:
+    if not raw:
+        return ""
+    # 按句子/行切分
+    parts = re.split(r"[。\n\r]+", raw)
+    parts = [p.strip() for p in parts if p.strip()]
 
+    # 优先选包含关键词的句子
+    scored = []
+    for p in parts:
+        score = sum(1 for k in KEYWORDS if k.lower() in p.lower())
+        scored.append((score, p))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    best = scored[0][1] if scored else raw.strip()
+    if len(best) > max_len:
+        best = best[:max_len].rstrip() + "…"
+    return best
 
 def call_rag_and_record(state: AgentState, query: str) -> str:
     raw = RAGAgent(query)  # 保持签名不变
-    raw_text = _coerce_to_text(raw)
     evidences = state.get("evidences", [])
     eid = f"E{len(evidences) + 1}"
     evidences.append({
         "id": eid,
         "query": query,
         "excerpt": extract_excerpt(raw),
-        "raw_text": raw_text
+        "raw_text": raw
     })
     state["evidences"] = evidences
-    return raw_text
+    return raw
 
 def retrieve_evidence_node(state: AgentState) -> AgentState:
     user_msg = state["user_message"]
@@ -135,54 +148,14 @@ PROMPT="""
 # """
 action_re = re.compile(r'^工具：(\w+)：(.*)$')
 
-def query(
-    question: str,
-    history: Optional[List[BaseMessage]] = None,
-    max_turns: int = 5,
-    debug: bool = False,
-    state: Optional[Dict[str, Any]] = None,
-) -> Tuple[str, List[BaseMessage], List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    Return: (reply_text, new_history_messages, tool_traces, new_state)
-
-    - tool_traces: for frontend debug panel
-    - new_state: per-session socratic state (saved by server.py)
-    """
+def query(question: str, history: Optional[List[BaseMessage]] = None, max_turns: int = 5, debug: bool = False):
     if history is None:
         history = []
 
-    # -----------------------------
-    # [ADD] Intent routing: ping scenario -> socratic controller
-    # -----------------------------
-    q = (question or "").strip()
-    q_low = q.lower()
-
-    # 一个实用的 ping 触发条件：包含 ping 或 “不通/连不通/超时/不可达”等
-    ping_trigger = (
-        ("ping" in q_low)
-        or ("不通" in q)
-        or ("连不通" in q)
-        or ("超时" in q)
-        or ("不可达" in q)
-        or ("unreachable" in q_low)
-        or ("timed out" in q_low)
-    )
-
-    if ping_trigger:
-        reply, history, tool_traces, new_state = handle_ping_socratic(
-            user_message=q,
-            history=history,
-            state_dict=state,
-        )
-        return reply, history, tool_traces, (new_state or {})
-
-    # -----------------------------
-    # Default: your original tool-loop agent
-    # -----------------------------
     i = 0
     bot = Agent(PROMPT, history)
-    next_prompt = q
-    tool_traces: List[Dict[str, Any]] = []
+    next_prompt = question
+    tool_traces = []  # <- 记录工具调用（便于前端 debug 面板展示）
 
     while i < max_turns:
         i += 1
@@ -193,10 +166,9 @@ def query(
 
         actions = [
             action_re.match(a)
-            for a in (result or "").split("\n")
+            for a in result.split("\n")
             if action_re.match(a)
         ]
-
         if actions:
             action, action_input = actions[0].groups()
             if action not in known_actions:
@@ -204,24 +176,19 @@ def query(
 
             observation = known_actions[action](action_input)
 
-            # 工具返回值可能是字符串或字典，展示/日志层统一转成可读文本
-            obs_output_str = _coerce_to_text(observation)
-
             tool_traces.append({
                 "tool": action,
                 "input": action_input,
-                "output": obs_output_str[:2000],
+                "output": observation[:2000],  # 防止过大
             })
 
-            next_prompt = f"检索结果：{obs_output_str}"
+            next_prompt = f"检索结果：{observation}"
             continue
+        else:
+            return result, history, tool_traces
 
-        # 没有工具调用，直接返回最终输出
-        return result, history, tool_traces, (state or {})
-
-    # 超过 max_turns 兜底返回（仍然返回 4 元组）
-    return result, history, tool_traces, (state or {})
-
+    # 超过 max_turns 兜底返回
+    return result, history, tool_traces
 
 
 def messages_to_dicts(messages: List[BaseMessage]) -> List[Dict[str, str]]:
