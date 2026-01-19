@@ -185,6 +185,13 @@ def query(
     bot = Agent(PROMPT, history)
     next_prompt = q
     tool_traces: List[Dict[str, Any]] = []
+    last_citations: List[Dict[str, Any]] = []
+
+    def _format_citations(citations: List[Dict[str, Any]]) -> str:
+        if not citations:
+            return ""
+        lines = [f"[{c.get('id')}] {c.get('source', 'unknown')}" for c in citations]
+        return "引用：\n" + "\n".join(lines)
 
     while i < max_turns:
         i += 1
@@ -205,6 +212,8 @@ def query(
                 raise Exception(f"Unknown action: {action}: {action_input}")
 
             observation = known_actions[action](action_input)
+            if isinstance(observation, dict) and observation.get("citations"):
+                last_citations = observation.get("citations") or []
 
             # 工具返回值可能是字符串或字典，展示/日志层统一转成可读文本
             obs_output_str = _coerce_to_text(observation)
@@ -219,9 +228,13 @@ def query(
             continue
 
         # 没有工具调用，直接返回最终输出
+        if last_citations and "引用：" not in (result or ""):
+            result = (result or "").rstrip() + "\n\n" + _format_citations(last_citations)
         return result, history, tool_traces, (state or {})
 
     # 超过 max_turns 兜底返回（仍然返回 4 元组）
+    if last_citations and "引用：" not in (result or ""):
+        result = (result or "").rstrip() + "\n\n" + _format_citations(last_citations)
     return result, history, tool_traces, (state or {})
 
 

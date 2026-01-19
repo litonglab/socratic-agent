@@ -139,3 +139,24 @@ RAG-Agent/
 uvicorn server:app --reload --port 8000
 启动前端:
 streamlit run app_streamlit.py
+
+---
+
+## 6. 本地嵌入模型（协作建议）
+为了避免将 2GB+ 模型推到 GitHub，推荐使用脚本下载到本地并通过环境变量指向。
+
+### 6.1 启动前设置路径
+```bash
+export EMBEDDING_MODEL_NAME=./models/bge-m3
+```
+
+### 6.2 网络不稳定时设置镜像，则不需开VPN（可选，推荐设置）
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+```
+
+### 6.3 一键下载（推荐）
+```bash
+python scripts/download_bge_m3.py
+```
+默认下载到 `models/bge-m3/`（已在 `.gitignore` 中忽略）。

@@ -1,111 +1,145 @@
+import os
+import re
+import zipfile
+from pathlib import Path
+from typing import Iterable, List, Optional
+
 from pydantic import BaseModel
 from tqdm import tqdm
 
-# from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_openai import OpenAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_community.document_loaders import TextLoader, Docx2txtLoader
+from langchain_community.document_loaders import Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
 
-from langchain_classic.chains import RetrievalQA
 from agentic_rag.llm_config import build_chat_llm
 
 # 加载环境变量，读取本地 .env 文件，里面定义了 OPENAI_API_KEY
 #_ = load_dotenv(find_dotenv())
 
 # llm
-# llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 llm = build_chat_llm(temperature=0)
 
-# 1. 加载docx文档
-loader = Docx2txtLoader("/Users/baoliliu/Downloads/networking-agent/RAG-Agent/data/实验1-网线配线架与机柜（2025版）.docx")
+# 1. 加载docx文档（批量，使用相对路径）
+BASE_DIR = Path(__file__).resolve().parents[1]
+DATA_DIR = BASE_DIR / "data"
+INDEX_DIR = BASE_DIR / "faiss_index"
+REBUILD_INDEX = os.getenv("RAG_REBUILD_INDEX", "1").lower() in {"1", "true", "yes"}
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
 
-documents = loader.load()
 
-
-def from_documents_with_tqdm(documents, embedding, **kwargs):
+def _extract_section(text: str) -> Optional[str]:
     """
-    最简单的进度条包装
+    简单的章节抽取：优先找“第X章/节/实验X”等标题式行。
     """
-    texts = [doc.page_content for doc in documents]
-    metadatas = [doc.metadata for doc in documents]
-    
-    print("正在生成向量...")
-    vectors = []
-    
-    # 使用tqdm显示进度
-    for text in tqdm(texts, desc="Processing"):
-        vector = embedding.embed_documents([text])[0]
-        vectors.append(vector)
-    
-    print("正在构建FAISS索引...")
-    
-    # 创建FAISS
-    return FAISS.from_embeddings(
-        text_embeddings=list(zip(texts, vectors)),
-        embedding=embedding,
-        metadatas=metadatas,
-        **kwargs
-    )
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    patterns = [
+        r"^第.+(章|节).*$",
+        r"^实验\s*\d+.*$",
+        r"^\d+(?:\.\d+){0,3}\s+.+$",
+    ]
+    for ln in lines[:10]:
+        for p in patterns:
+            if re.match(p, ln):
+                return ln
+    return None
+
+
+def _enrich_metadata(chunks, source_path: str) -> List:
+    source_name = Path(source_path).name
+    for i, doc in enumerate(chunks):
+        meta = dict(doc.metadata or {})
+        meta["source"] = source_name
+        meta["chunk_id"] = f"{Path(source_path).stem}-{i:05d}"
+        meta["start_index"] = meta.get("start_index")
+        section = _extract_section(doc.page_content)
+        if section:
+            meta["section"] = section
+        doc.metadata = meta
+    return chunks
+
+
+def normalize_source_to_filename(docs):
+    for d in docs:
+        meta = d.metadata or {}
+        src = meta.get("source") or meta.get("file_path")
+        if src:
+            d.metadata["source"] = Path(src).name
+        else:
+            d.metadata["source"] = "unknown"
+    return docs
 
 # 使用
 
-# # 2. 创建文本分割器
-# text_splitter = RecursiveCharacterTextSplitter(
-#     chunk_size=500,      # 每个chunk的大小
-#     chunk_overlap=100,    # chunk之间的重叠部分
-#     separators=["\n\n", "\n", "。", "，", " ", ""],  # 分割符
-#     length_function=len,
-# )
-# print("finish loader")
-# # 3. 分割文本
-# texts = text_splitter.split_documents(documents)
-# print(1)
-# # 选择向量模型，并灌库
+# 2. 创建文本分割器（必须分块 + 记录 start_index）
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500,
+    chunk_overlap=100,
+    separators=["\n\n", "\n", "。", "，", " ", ""],
+    length_function=len,
+    add_start_index=True,
+)
+print("finish loader")
 
-# vectors = []
-embeddings = OpenAIEmbeddings(model="text-embedding-ada-002")
-# print("正在生成向量...")
-# texts=[text.page_content for text in texts]
-# # 使用tqdm显示进度
-# for text in tqdm(texts, desc="Processing"):
-#     #text = text.page_content
-#     vector = embeddings.embed_documents([text])[0]
-#     vectors.append(vector)
-    
-# print("正在构建FAISS索引...")
-    
-#     # 创建FAISS
-# db=FAISS.from_embeddings(
-#         text_embeddings=list(zip(texts, vectors)),
-#         embedding=embeddings
-#     )
-# db.save_local("faiss_index")  # 会生成两个文件: faiss_index.pkl 和 faiss_index
+# 2. 批量加载 docx
+docx_files = sorted(DATA_DIR.glob("*.docx"))
+if not docx_files:
+    raise RuntimeError(f"未在 {DATA_DIR} 下找到 .docx 文件")
 
-loaded_vectorstore = FAISS.load_local(
-    "faiss_index",  # 保存目录
-    embeddings,  # 需要相同的嵌入模型（用于新查询）
-    allow_dangerous_deserialization=True  # 新版本需要这个参数
+all_chunks: List = []
+for docx_path in docx_files:
+    loader = Docx2txtLoader(str(docx_path))
+    try:
+        docs = loader.load()
+    except zipfile.BadZipFile:
+        print(f"[Skip] 非法 docx 文件（不是 zip）：{docx_path}")
+        continue
+    except Exception as e:
+        print(f"[Skip] 读取 docx 失败：{docx_path}，原因：{e}")
+        continue
+    chunks = text_splitter.split_documents(docs)
+    chunks = _enrich_metadata(chunks, str(docx_path))
+    all_chunks.extend(chunks)
+
+# 3. 分割文本 + metadata（已批量处理）
+chunks = normalize_source_to_filename(all_chunks)
+
+# 4. 嵌入模型（本地优先：BAAI/bge-m3）
+embeddings = HuggingFaceEmbeddings(
+    model_name=EMBEDDING_MODEL_NAME,
+    encode_kwargs={"normalize_embeddings": True},
 )
 
-# 使用加载的向量库
-#db = loaded_vectorstore.similarity_search("查询文本")
+# 5. 构建或加载 FAISS
+if REBUILD_INDEX or not Path(INDEX_DIR).exists():
+    print("正在构建FAISS索引...")
+    vectorstore = FAISS.from_documents(chunks, embeddings)
+    vectorstore.save_local(INDEX_DIR)
+    print(f"向量索引已保存到 {INDEX_DIR}/ 目录")
 
-print("向量索引已保存到 faiss_index/ 目录")
-#db = FAISS.from_documents(texts, OpenAIEmbeddings(model="text-embedding-ada-002"))
-# 获取检索器，选择 top-2 相关的检索结果
-retriever = loaded_vectorstore.as_retriever(search_kwargs={"k": 2})
+loaded_vectorstore = FAISS.load_local(
+    INDEX_DIR,
+    embeddings,
+    allow_dangerous_deserialization=True,
+)
+
+# 6. 使用 MMR 检索（更分散）
+retriever = loaded_vectorstore.as_retriever(
+    search_type="mmr",
+    search_kwargs={"k": 6, "fetch_k": 20, "lambda_mult": 0.5},
+)
 print("finish embeding")
 # 创建带有 system 消息的模板
 prompt_template = ChatPromptTemplate.from_messages([
-    ("system", """你是一个对接问题排查机器人。
-               你的任务是根据下述给定的已知信息回答用户问题。
-               确保你的回复完全依据下述已知信息。不要编造答案。
-               请用中文回答用户问题。
-               
-               已知信息:
-               {context} """),
+    ("system", """你是网络实验排错助教。你必须仅依据“已知信息”回答，不得编造。
+回答中的每个关键结论句末尾必须用引用编号标注来源，格式为 [n]，n 来自已知信息块的编号。
+如果已知信息不足以支持结论，回答“无法从已知信息确定”。
+
+已知信息:
+{context} """),
     ("user", "{question}")
 ])
 
@@ -114,18 +148,64 @@ chain_type_kwargs = {
     "prompt": prompt_template,
 }
 
-# 定义RetrievalQA链
-qa_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    chain_type="stuff",  # 使用stuff模式将上下文拼接到提示词中
-    chain_type_kwargs=chain_type_kwargs,
-    retriever=retriever
-)
+def build_citations(docs, max_sources: int = 6, snippet_len: int = 180):
+    citations = []
+    for i, d in enumerate(docs[:max_sources], start=1):
+        src = (d.metadata or {}).get("source", "unknown")
+        snippet = (d.page_content or "").replace("\n", " ").strip()[:snippet_len]
+        citations.append({
+            "id": i,
+            "source": src,
+            "snippet": snippet,
+        })
+    return citations
+
+
+def build_numbered_context(docs, citations):
+    parts = []
+    for c, d in zip(citations, docs):
+        header = f"[{c['id']}] {c['source']}"
+        parts.append(f"{header}\n{(d.page_content or '').strip()}")
+    return "\n\n".join(parts)
+
+
+def _ensure_inline_citations(answer: str, default_id: int = 1) -> str:
+    """
+    若模型未输出任何 [n]，则按句末补一个默认引用编号。
+    """
+    if re.search(r"\[\d+\]", answer or ""):
+        return answer
+    if not answer:
+        return answer
+    # 对中文句号/问号/叹号进行补标
+    answer = re.sub(r"([。！？!?])", r"\1" + f" [{default_id}]", answer)
+    # 若没有句末标点，给最后追加
+    if f"[{default_id}]" not in answer:
+        answer = answer.rstrip() + f" [{default_id}]"
+    return answer
 
 
 def RAGAgent(message):
-    answer = qa_chain.invoke(message)
-    return answer
+    try:
+        docs = retriever.invoke(message)
+    except Exception:
+        docs = retriever.get_relevant_documents(message)
+
+    citations = build_citations(docs)
+    context = build_numbered_context(docs, citations)
+
+    messages = prompt_template.format_messages(context=context, question=message)
+    resp = llm.invoke(messages)
+    answer = getattr(resp, "content", str(resp))
+    if citations:
+        answer = _ensure_inline_citations(answer, default_id=citations[0]["id"])
+
+    # 兜底：如果模型未内联引用，也在回答末尾追加引用列表
+    if citations:
+        footer = "\n".join([f"[{c['id']}] {c['source']}" for c in citations])
+        answer = answer.rstrip() + "\n\n引用：\n" + footer
+
+    return {"answer": answer, "citations": citations}
 
 
 if __name__ == "__main__":

@@ -19,10 +19,8 @@ from networkx.readwrite import json_graph
 from docx import Document as DocxDocument
 from PIL import Image
 
-from openai import OpenAI
-
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
 
@@ -88,6 +86,7 @@ class TopologyExtraction(BaseModel):
 # =========================
 
 SUPPORTED_IMAGE_SUFFIX = {".png", ".jpg", ".jpeg", ".webp"}
+TOPO_VISION_ENABLED = os.getenv("TOPO_VISION_ENABLED", "0").lower() in {"1", "true", "yes"}
 
 def _safe_mkdir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
@@ -197,6 +196,7 @@ def _extract_topology_from_image_openai(image_path: str, vision_model: str = "gp
     """
     需要 openai>=1.x 且支持 Responses API 的 parse（Structured Outputs）。
     """
+    from openai import OpenAI
     client = OpenAI()
     data_url = _image_to_data_url(image_path)
 
@@ -369,7 +369,7 @@ def _topology_facts(G: nx.Graph) -> List[str]:
 
 def _faiss_from_documents_with_tqdm(
     documents: List[Document],
-    embedding: OpenAIEmbeddings,
+    embedding: HuggingFaceEmbeddings,
     batch_size: int = 32,
 ) -> FAISS:
     texts = [d.page_content for d in documents]
@@ -414,6 +414,10 @@ def BuildTopoIndexFromDocxImages(
     同时落盘：images/ topology_json/ graphs/ manifest.json faiss_topo_index/
     返回 persist_dir
     """
+    if not TOPO_VISION_ENABLED:
+        raise RuntimeError(
+            "拓扑图解析已禁用（TOPO_VISION_ENABLED=0）。如需启用请设置环境变量 TOPO_VISION_ENABLED=1。"
+        )
     root = Path(persist_dir)
     _safe_mkdir(root)
 
@@ -546,7 +550,10 @@ def BuildTopoIndexFromDocxImages(
         raise RuntimeError("所有图片都未得到有效拓扑 facts，未能构建向量库。请检查 docx 图片是否为拓扑图且清晰可读。")
 
     # 6) facts -> FAISS
-    embeddings = OpenAIEmbeddings(model=embedding_model)
+    embeddings = HuggingFaceEmbeddings(
+        model_name=embedding_model,
+        encode_kwargs={"normalize_embeddings": True},
+    )
     db = _faiss_from_documents_with_tqdm(all_fact_docs, embeddings, batch_size=embed_batch_size)
 
     _safe_mkdir(faiss_dir)
@@ -583,7 +590,10 @@ def LoadTopoRetriever(
     if not (faiss_dir.exists() and (faiss_dir / "index.faiss").exists()):
         raise RuntimeError(f"未找到 FAISS 索引：{faiss_dir}. 请先运行 BuildTopoIndexFromDocxImages().")
 
-    embeddings = OpenAIEmbeddings(model=embedding_model)
+    embeddings = HuggingFaceEmbeddings(
+        model_name=embedding_model,
+        encode_kwargs={"normalize_embeddings": True},
+    )
     db = FAISS.load_local(
         str(faiss_dir),
         embeddings,
@@ -694,6 +704,8 @@ def TopoRetriever(query: str) -> str:
     if _GLOBAL_TOPO_RETRIEVER is None:
         persist_dir = "topo_store_lab13"
         if not os.path.exists(persist_dir):
+            if not TOPO_VISION_ENABLED:
+                return "拓扑检索已禁用（TOPO_VISION_ENABLED=0），且本地拓扑索引不存在。"
             # 如果目录不存在，尝试构建一个默认的（可选，根据实际情况决定）
             # 这里先打印错误并抛出异常，或者你可以选择自动 Build
             print(f"[Warning] 拓扑索引目录 {persist_dir} 不存在，请先运行 BuildTopoIndexFromDocxImages")

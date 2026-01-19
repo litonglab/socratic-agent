@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from langchain_community.document_loaders import Docx2txtLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from docx import Document as docxdocument
 
@@ -24,7 +24,10 @@ def simple_vectorize_folder(
     #os.environ["OPENAI_API_KEY"] = openai_api_key
     
     # 初始化组件
-    embeddings = OpenAIEmbeddings()
+    embeddings = HuggingFaceEmbeddings(
+        model_name=os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3"),
+        encode_kwargs={"normalize_embeddings": True},
+    )
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=200)
     
     all_documents = []
