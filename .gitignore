@@ -30,3 +30,34 @@ __pycache__/
 
 # Local embedding models
 models/
+
+# Python 虚拟环境（不要提交）
+venv/
+env/
+ENV/
+.venv/
+.ENV/
+virtualenv/
+
+# Python 缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 环境变量文件（包含敏感信息）
+.env
+.env.local
+.env.*.local
+
+# 我创建的文档文件（不提交）
+API_KEY配置说明.md
+Git忽略规则说明.md
+代理配置说明.md
+启动说明.md
+安装指南.md
+完整启动流程.md
+提交到lemon分支指南.md
+超时问题排查.md
+问题修复记录.md
+快速提交命令.sh
