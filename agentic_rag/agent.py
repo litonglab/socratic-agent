@@ -33,6 +33,41 @@ KEYWORDS = [
 ]
 
 # -------------------------------------------------------------------------
+# [新增] 相关性检查函数
+# -------------------------------------------------------------------------
+def check_relevance(question: str) -> bool:
+    """
+    判断用户问题是否与计算机网络课程高度相关。
+    返回: True (相关) | False (无关)
+    """
+    q_str = (question or "").strip()
+    if not q_str:
+        return True # 空消息放行
+
+    # 快速放行常见交互词，节省Token
+    greetings = ["你好", "hello", "hi", "谢谢", "再见", "help", "救命", "提示"]
+    if len(q_str) < 10 and any(g in q_str.lower() for g in greetings):
+        return True
+
+    # 使用LLM进行意图分类
+    relevance_prompt = """
+    你是一个严格的分类器。你的任务是判断用户输入是否与“计算机网络实验课程”强相关。
+
+    强相关的主题包括：
+    - 计算机相关知识
+    - 网络协议（TCP/IP, OSPF, BGP, VLAN, STP, ARP等）
+    - IP地址、子网划分、路由
+    - 网络设备配置（路由器、交换机命令）
+    - 网络故障排查（ping, traceroute, 抓包分析）
+    - 课程实验内容、拓扑图
+    - 对助教回复的追问（为什么、怎么做、不明白）
+
+    如果输入明确属于上述范围，请只回答 "YES"。
+    如果输入明显是其他领域（例如：历史、文学、菜谱、通用聊天），请只回答 "NO"。
+    只回答 "YES" 或 "NO"。
+    """
+
+# -------------------------------------------------------------------------
 # [新增] Hint Level 管理逻辑
 # -------------------------------------------------------------------------
 def determine_hint_level(state: Dict[str, Any], user_question: str) -> int:
@@ -320,9 +355,23 @@ def query(
     if state is None:
         state = {}
 
-    # -----------------------------
-    # [ADD] Intent routing: ping scenario -> socratic controller
-    # -----------------------------
+    # ---------------------------------------------------------------------
+    # [新增] 1. 课程相关性检查 (Guardrail)
+    # ---------------------------------------------------------------------
+    is_relevant = check_relevance(question)
+    if not is_relevant:
+        reply = "与本课程无关，不予回答。"
+        # 保持对话历史的完整性
+        history.append(HumanMessage(content=question))
+        history.append(AIMessage(content=reply))
+        if debug:
+            print(f"[Guardrail] Blocked irrelevant query: '{question}'")
+        # 直接返回，中断后续所有逻辑
+        return reply, history, [], state
+
+    # ---------------------------------------------------------------------
+    # [原功能] 2. Intent routing: ping scenario -> socratic controller (无修改)
+    # ---------------------------------------------------------------------
     q = (question or "").strip()
     q_low = q.lower()
 
