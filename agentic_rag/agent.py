@@ -32,92 +32,85 @@ KEYWORDS = [
     "show", "display", "ping", "traceroute", "邻居", "路由表"
 ]
 
+# client=ChatOpenAI(model="gpt-4o-mini", temperature=0)
+client = build_chat_llm(temperature=0)
+
 # -------------------------------------------------------------------------
-# [新增] 相关性检查函数
+# [修改优化] 相关性检查函数
 # -------------------------------------------------------------------------
 def check_relevance(question: str) -> bool:
     """
-    判断用户问题是否与计算机网络课程高度相关。
+    判断用户问题是否与计算机网络课程相关（含理论与实验）。
     返回: True (相关) | False (无关)
     """
     q_str = (question or "").strip()
     if not q_str:
         return True # 空消息放行
 
-    # 快速放行常见交互词，节省Token
-    greetings = ["你好", "hello", "hi", "谢谢", "再见", "help", "救命", "提示"]
-    if len(q_str) < 10 and any(g in q_str.lower() for g in greetings):
+    # 快速放行常见交互词
+    greetings = ["你好", "hello", "hi", "谢谢", "再见", "help", "救命", "提示", "是什么", "what is"]
+    if len(q_str) < 15 and any(g in q_str.lower() for g in greetings):
         return True
 
     # 使用LLM进行意图分类
+    # 修改点：明确包含“理论概念”和“基础定义”，防止误杀基础问题
     relevance_prompt = """
-    你是一个严格的分类器。你的任务是判断用户输入是否与“计算机网络实验课程”强相关。
+    你是一个计算机网络课程的意图判断助手。请判断用户的输入是否属于计算机网络领域（含理论与实验）。
 
-    强相关的主题包括：
-    - 计算机相关知识
-    - 网络协议（TCP/IP, OSPF, BGP, VLAN, STP, ARP等）
-    - IP地址、子网划分、路由
-    - 网络设备配置（路由器、交换机命令）
-    - 网络故障排查（ping, traceroute, 抓包分析）
-    - 课程实验内容、拓扑图
-    - 对助教回复的追问（为什么、怎么做、不明白）
+    【属于相关范围（YES）】：
+    1. **基础概念与定义**（如：什么是网络协议、OSI模型、TCP/IP、封装、带宽等）。
+    2. **网络协议原理**（如：OSPF机制、VLAN原理、ARP过程）。
+    3. **实验操作与配置**（如：Cisco/Huawei命令、模拟器使用、拓扑连接）。
+    4. **网络故障排查**（如：Ping不通、连通性测试、抓包分析）。
+    5. **一般的课程询问**（如：怎么做实验、不明白、下一步做什么）。
+    6. **计算机基础知识** （如：计算机硬件，编程语言语法，基础算法）
 
-    如果输入明确属于上述范围，请只回答 "YES"。
-    如果输入明显是其他领域（例如：历史、文学、菜谱、通用聊天），请只回答 "NO"。
-    只回答 "YES" 或 "NO"。
+    【属于无关范围（NO）】：
+    1. 明显的闲聊（如：今天天气怎么样、讲个笑话）。
+    2. 其他学科（如：历史、生物、化学、烹饪）。
+    3. 情感咨询或娱乐八卦。
+
+    如果用户的问题属于【相关范围】，请回复 "YES"。
+    如果属于【无关范围】，请回复 "NO"。
+    只回复 "YES" 或 "NO"。
     """
+    
+    messages = [
+        SystemMessage(content=relevance_prompt),
+        HumanMessage(content=f"用户输入: {q_str}")
+    ]
+    
+    try:
+        response = client.invoke(messages)
+        result = response.content.strip().upper()
+        # 只要不是明确的 "NO"，都倾向于认为是相关的
+        return "NO" not in result
+    except Exception as e:
+        print(f"[Warning] Relevance check failed: {e}, defaulting to relevant.")
+        return True
 
 # -------------------------------------------------------------------------
-# [新增] Hint Level 管理逻辑
+# [原功能] Hint Level 管理逻辑
 # -------------------------------------------------------------------------
 def determine_hint_level(state: Dict[str, Any], user_question: str) -> int:
-    """
-    根据用户输入关键词 和 对话轮数 共同决定 Hint Level。
-    逻辑：
-    1. 轮数逻辑：每 3 轮自动提升一级保底 Level (0->1->2->3)。
-    2. 关键词逻辑：用户喊不懂/求助时，在当前基础上 +1。
-    3. 取两者最大值。
-    """
-    # 1. 获取并更新轮数
-    # 如果是新会话，默认为 0，加 1 后变为第 1 轮
     current_turn = state.get("user_turn_count", 0) + 1
     state["user_turn_count"] = current_turn
-    
-    # 2. 计算【轮数保底等级】
-    # 第 1-3 轮 -> 0
-    # 第 4-6 轮 -> 1
-    # 第 7-9 轮 -> 2
-    # 第 10+ 轮 -> 3
     turn_based_floor = (current_turn - 1) // 3
-
-    # 3. 计算【关键词触发等级】
-    # 获取上一次的状态等级，如果不存在则从 0 开始
     previous_level = state.get("hint_level", 0)
-    
     help_keywords = [
         "不懂", "不会", "不知道", "提示", "又错了", "还是不对", 
         "怎么办", "怎么做", "为什么", "结果是啥", "给个答案",
         "太难", "迷糊", "仔细", "解释", "看不懂", "好难"
     ]
-    
     q_lower = user_question.lower()
     keyword_triggered_level = previous_level
-    
-    # 如果用户明确表示困惑，尝试升级
     if any(k in q_lower for k in help_keywords):
         keyword_triggered_level = previous_level + 1
-
-    # 4. 最终决策：取最大值，并限制在 0~3 之间
     final_level = max(turn_based_floor, keyword_triggered_level)
-    final_level = min(final_level, 3) # 上限锁定为 3
-    
+    final_level = min(final_level, 3)
     return final_level
 
 def get_strategy_prompt(level: int) -> str:
-    """
-    根据 Level 返回给 LLM 的强制策略指令。
-    这些指令将注入到 System Prompt 的 {current_strategy_instruction} 占位符中。
-    """
     strategies = {
         0: (
             "【当前策略：Level 0 - 纯粹引导与概念启发】\n"
@@ -138,8 +131,7 @@ def get_strategy_prompt(level: int) -> str:
             "**【输出话术范例】**：\n"
             "- “要实现两台 PC 的互通，在网络层我们需要确保什么条件满足？请回顾一下实验指导书第 2 章关于‘网关’的定义。”\n"
             "- “你现在的现象是 Ping 不通。在判断是线路问题还是配置问题之前，通常我们第一步会检查什么物理状态？”\n"
-            "- “根据证据 E1，OSPF 建立邻居有几个必要参数。你确认过这些参数在你的设备上都配置了吗？”"
-            "- “根据证据 E1，OSPF 建立邻居有几个必要参数。你确认过这些参数在你的设备上都配置了吗？”"
+            "- “根据证据 E1，OSPF 建立邻居有几个必要参数。你确认过这些参数在你的设备上都配置了吗？”\n"
             "- “实验13需要你掌握掌握子网划分的方法与原理；能够根据各部门PC数量划分子网，合理分配IP地址；配置交换机VLAN、Trunk口、三层交换机接口；配置静态路由，实现跨网段通信；理解路由聚合的作用，简化路由表配置。你有好好理解相关知识吗？”"
         ),
         
@@ -214,6 +206,7 @@ def get_strategy_prompt(level: int) -> str:
         )
     }
     return strategies.get(level, strategies[0])
+
 # -------------------------------------------------------------------------
 
 def call_rag_and_record(state: AgentState, query: str) -> str:
@@ -244,9 +237,6 @@ def retrieve_evidence_node(state: AgentState) -> AgentState:
 
     return state
 
-# client=ChatOpenAI(model="gpt-4o-mini", temperature=0)
-client = build_chat_llm(temperature=0)
-
 class Agent():
     def __init__(self, prompt,history):
         self.prompt = prompt
@@ -260,7 +250,7 @@ class Agent():
             self.messages.append(SystemMessage(content=prompt))
     def __call__(self, message,history) :
         self.messages.append(HumanMessage(content=message))
-        # history.append(HumanMessage(content=message)) # 注：query loop中维护history，此处仅处理当前流
+        # history.append(HumanMessage(content=message)) 
         result = self.execute() 
         self.messages.append(AIMessage(content=result)) 
         # history.append(AIMessage(content=result)) 
@@ -275,7 +265,6 @@ known_actions={
     "拓扑":TopoRetriever,
 }
 
-# [修改] 改名为 BASE_PROMPT，并添加占位符 {current_strategy_instruction}
 BASE_PROMPT="""
 你是“计算机网络实验课 AI 助教系统”的核心智能体，目标是通过“证据驱动的 RAG + 苏格拉底式引导”帮助学生完成实验理解与故障排查。你必须优先保证：证据准确、过程可追溯、教学不越界、结论可执行。
 
@@ -346,9 +335,6 @@ def query(
 ) -> Tuple[str, List[BaseMessage], List[Dict[str, Any]], Dict[str, Any]]:
     """
     Return: (reply_text, new_history_messages, tool_traces, new_state)
-
-    - tool_traces: for frontend debug panel
-    - new_state: per-session socratic state (saved by server.py)
     """
     if history is None:
         history = []
@@ -361,21 +347,17 @@ def query(
     is_relevant = check_relevance(question)
     if not is_relevant:
         reply = "与本课程无关，不予回答。"
-        # 保持对话历史的完整性
         history.append(HumanMessage(content=question))
         history.append(AIMessage(content=reply))
         if debug:
             print(f"[Guardrail] Blocked irrelevant query: '{question}'")
-        # 直接返回，中断后续所有逻辑
         return reply, history, [], state
 
     # ---------------------------------------------------------------------
-    # [原功能] 2. Intent routing: ping scenario -> socratic controller (无修改)
+    # [原功能] 2. Intent routing: ping scenario (无修改)
     # ---------------------------------------------------------------------
     q = (question or "").strip()
     q_low = q.lower()
-
-    # 一个实用的 ping 触发条件：包含 ping 或 “不通/连不通/超时/不可达”等
     ping_trigger = (
         ("ping" in q_low)
         or ("不通" in q)
@@ -385,7 +367,6 @@ def query(
         or ("unreachable" in q_low)
         or ("timed out" in q_low)
     )
-
     if ping_trigger:
         reply, history, tool_traces, new_state = handle_ping_socratic(
             user_message=q,
@@ -395,23 +376,17 @@ def query(
         return reply, history, tool_traces, (new_state or {})
 
     # -----------------------------
-    # [NEW LOGIC] Determine Hint Level & Prompt Strategy
+    # [原功能] 3. Hint Level Strategy (无修改)
     # -----------------------------
-    # 1. 计算 Hint Level (根据轮数 + 关键词)
     current_hint_level = determine_hint_level(state, q)
     state["hint_level"] = current_hint_level
-    
-    # 2. 获取 Prompt 策略文本
     strategy_instruction = get_strategy_prompt(current_hint_level)
-    
-    # 3. 动态生成最终 Prompt
     final_prompt = BASE_PROMPT.format(current_strategy_instruction=strategy_instruction)
 
     # -----------------------------
-    # Default: your original tool-loop agent
+    # [原功能] 4. Agent Loop (无修改)
     # -----------------------------
     i = 0
-    # 注意：这里使用 final_prompt 初始化 Agent
     bot = Agent(final_prompt, history)
     next_prompt = q
     tool_traces: List[Dict[str, Any]] = []
@@ -425,9 +400,6 @@ def query(
 
     while i < max_turns:
         i += 1
-        # 调用 Agent
-        # Agent.__call__ 会处理 history 的 append（在内存中），
-        # 但我们需要确保返回的 history 列表正确反映了对话流
         result, _ = bot(next_prompt, history)
 
         if debug:
@@ -448,7 +420,6 @@ def query(
             if isinstance(observation, dict) and observation.get("citations"):
                 last_citations = observation.get("citations") or []
 
-            # 工具返回值可能是字符串或字典，展示/日志层统一转成可读文本
             obs_output_str = _coerce_to_text(observation)
 
             tool_traces.append({
@@ -460,25 +431,14 @@ def query(
             next_prompt = f"检索结果：{obs_output_str}"
             continue
 
-        # 没有工具调用，直接返回最终输出
         if last_citations and "引用：" not in (result or ""):
             result = (result or "").rstrip() + "\n\n" + _format_citations(last_citations)
         
-        # 此时的 history 已经被 bot 在内部更新过了（如果引用传递生效）
-        # 即使引用传递没生效，我们可以通过 append 手动维护
-        if isinstance(history, list):
-            # 为了保险起见，这里显式追加一次（假设 Agent 内部只是追加到了 self.messages 而不是 history 引用）
-            # 根据你原本的 Agent.__call__ 代码：history.append(AIMessage(content=result)) 是在内部做的
-            # 所以这里不需要额外 append，只需要返回传入的 history 引用即可
-            pass
-
         return result, history, tool_traces, (state or {})
 
-    # 超过 max_turns 兜底返回（仍然返回 4 元组）
     if last_citations and "引用：" not in (result or ""):
         result = (result or "").rstrip() + "\n\n" + _format_citations(last_citations)
     return result, history, tool_traces, (state or {})
-
 
 
 def messages_to_dicts(messages: List[BaseMessage]) -> List[Dict[str, str]]:
@@ -506,15 +466,12 @@ def dicts_to_messages(items: List[Dict[str, str]]) -> List[BaseMessage]:
     return out
 
 if __name__ == "__main__":
-    message="我对子网划分感到困惑"
-    # 模拟第一次调用，状态为空
-    state = {}
-    output, history, _, new_state = query(message, state=state)
-    print(output)
-    print(f"DEBUG: Hint Level = {new_state.get('hint_level')}, Turn = {new_state.get('user_turn_count')}")
-
-    message1="那我该怎么子网划分IP地址呢"
-    # 模拟第二次调用，传入上一次的状态
-    output1, history1, _, new_state1 = query(message1, history, state=new_state)
-    print(output1)
-    print(f"DEBUG: Hint Level = {new_state1.get('hint_level')}, Turn = {new_state1.get('user_turn_count')}")
+    # 测试相关性守卫
+    print("--- Testing Relevance Guardrail ---")
+    q1 = "什么是网络协议？"
+    output1, _, _, _ = query(q1, debug=True)
+    print(f"\n[Q: {q1}] => {output1[:50]}...") 
+    
+    q2 = "宫保鸡丁怎么做？"
+    output2, _, _, _ = query(q2, debug=True)
+    print(f"\n[Q: {q2}] => {output2}")
