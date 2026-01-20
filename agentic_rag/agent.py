@@ -23,7 +23,8 @@ class AgentState(TypedDict, total=False):
     user_message: str
     evidences: List[Evidence]
     hint_level: int
-    user_turn_count: int  # [新增] 记录用户对话轮数
+    user_turn_count: int
+    question_category: str # [新增] 记录问题分类
     mode: str  # "socratic" | "direct"
 
 KEYWORDS = [
@@ -32,11 +33,10 @@ KEYWORDS = [
     "show", "display", "ping", "traceroute", "邻居", "路由表"
 ]
 
-# client=ChatOpenAI(model="gpt-4o-mini", temperature=0)
 client = build_chat_llm(temperature=0)
 
 # -------------------------------------------------------------------------
-# [修改优化] 相关性检查函数
+# [原功能] 相关性检查函数 (保持不变)
 # -------------------------------------------------------------------------
 def check_relevance(question: str) -> bool:
     """
@@ -53,7 +53,6 @@ def check_relevance(question: str) -> bool:
         return True
 
     # 使用LLM进行意图分类
-    # 修改点：明确包含“理论概念”和“基础定义”，防止误杀基础问题
     relevance_prompt = """
     你是一个计算机网络课程的意图判断助手。请判断用户的输入是否属于计算机网络领域（含理论与实验）。
 
@@ -83,189 +82,65 @@ def check_relevance(question: str) -> bool:
     try:
         response = client.invoke(messages)
         result = response.content.strip().upper()
-        # 只要不是明确的 "NO"，都倾向于认为是相关的
         return "NO" not in result
     except Exception as e:
         print(f"[Warning] Relevance check failed: {e}, defaulting to relevant.")
         return True
 
 # -------------------------------------------------------------------------
-# [原功能] Hint Level 管理逻辑
+# [新增] 问题分类器 (4类)
 # -------------------------------------------------------------------------
-def determine_hint_level(state: Dict[str, Any], user_question: str) -> int:
-    current_turn = state.get("user_turn_count", 0) + 1
-    state["user_turn_count"] = current_turn
-    turn_based_floor = (current_turn - 1) // 3
-    previous_level = state.get("hint_level", 0)
-    help_keywords = [
-        "不懂", "不会", "不知道", "提示", "又错了", "还是不对", 
-        "怎么办", "怎么做", "为什么", "结果是啥", "给个答案",
-        "太难", "迷糊", "仔细", "解释", "看不懂", "好难"
-    ]
-    q_lower = user_question.lower()
-    keyword_triggered_level = previous_level
-    if any(k in q_lower for k in help_keywords):
-        keyword_triggered_level = previous_level + 1
-    final_level = max(turn_based_floor, keyword_triggered_level)
-    final_level = min(final_level, 3)
-    return final_level
+def detect_question_category(question: str) -> str:
+    """
+    将问题归类为四大场景之一。
+    """
+    prompt = """
+    请分析用户关于“计算机网络”的问题，将其归类为以下四类之一：
 
-def get_strategy_prompt(level: int) -> str:
-    strategies = {
-        0: (
-            "【当前策略：Level 0 - 纯粹引导与概念启发】\n"
-            "--------------------------------------------------\n"
-            "**你的角色**：你是一位严格的“苏格拉底式导师”。你的目标是**暴露学生的知识盲区**，而不是填补它。\n"
-            "**核心原则**：授人以鱼不如授人以渔。学生目前处于探索初期，必须让他们自己去“撞墙”并发现墙在哪里。\n"
-            "\n"
-            "**【严禁事项（违反将视为教学事故）】**：\n"
-            "1. ❌ 严禁提及任何具体的错误原因（如“MTU不匹配”、“缺少路由”）。\n"
-            "2. ❌ 严禁提及具体的排查命令（如“用 show ip interface brief 看看”）。\n"
-            "3. ❌ 严禁写出完整的配置命令。\n"
-            "\n"
-            "**【必须执行的思维步骤】**：\n"
-            "1. **知识检索**：根据 RAG 证据，确定学生当前问题背后的核心概念是什么（例如：OSPF 邻居建立的条件、VLAN 的标签规则）。\n"
-            "2. **盲区定位**：判断学生是“不知道这个概念”还是“忘了做某一步检查”。\n"
-            "3. **反向发问**：设计一个问题，引导学生自己去翻阅实验指导书或回忆理论课内容。\n"
-            "\n"
-            "**【输出话术范例】**：\n"
-            "- “要实现两台 PC 的互通，在网络层我们需要确保什么条件满足？请回顾一下实验指导书第 2 章关于‘网关’的定义。”\n"
-            "- “你现在的现象是 Ping 不通。在判断是线路问题还是配置问题之前，通常我们第一步会检查什么物理状态？”\n"
-            "- “根据证据 E1，OSPF 建立邻居有几个必要参数。你确认过这些参数在你的设备上都配置了吗？”\n"
-            "- “实验13需要你掌握掌握子网划分的方法与原理；能够根据各部门PC数量划分子网，合理分配IP地址；配置交换机VLAN、Trunk口、三层交换机接口；配置静态路由，实现跨网段通信；理解路由聚合的作用，简化路由表配置。你有好好理解相关知识吗？”"
-        ),
-        
-        1: (
-            "【当前策略：Level 1 - 现象聚焦与线索提示】\n"
-            "--------------------------------------------------\n"
-            "**你的角色**：你是一位敏锐的“现场观察员”。学生已经有了基础概念，但迷失在海量的 CLI 输出或拓扑细节中，找不着北。\n"
-            "**核心原则**：缩小搜查范围。把学生的手指引向错误发生的地方，但**闭口不谈**具体的错误原因。\n"
-            "\n"
-            "**【严禁事项】**：\n"
-            "1. ❌ 严禁解释“为什么错”（不要说原理）。\n"
-            "2. ❌ 严禁给出修改建议（不要说“你应该把这个改大一点”）。\n"
-            "3. ❌ 严禁写出完整的配置命令。\n"
-            "\n"
-            "**【必须执行的思维步骤】**：\n"
-            "1. **证据对比**：在内心对比 RAG 提供的“正常状态证据”和学生提供的“当前状态”。\n"
-            "2. **锁定差异**：找到差异所在的具体字段（如 `Status`、`Protocol`、`Mask`）或拓扑位置（如 `G0/0/1` 接口）。\n"
-            "3. **定向引导**：告诉学生“去盯着这个地方看”。\n"
-            "\n"
-            "**【输出话术范例】**：\n"
-            "- “请仔细观察 `show ip ospf neighbor` 输出中的 `State` 字段。根据证据 E2，正常的建立状态应该是 Full，但你那里显示的是什么？”\n"
-            "- “注意看拓扑图上路由器 R1 和 R2 之间的连线。你配置 IP 地址的接口号，和物理连线的接口号是一致的吗？”\n"
-            "- “你的 Ping 虽然通了，但是延迟很大。请检查一下接口的双工模式（Duplex）字段。”"
-        ),
-        
-        2: (
-            "【当前策略：Level 2 - 原理解析与逻辑指导】\n"
-            "--------------------------------------------------\n"
-            "**你的角色**：你是一位资深的“理论讲师”。学生已经看到了错误现象，但不懂背后的机制，不知道如何下手修改。\n"
-            "**核心原则**：讲透原理，给出“自然语言”的修复逻辑，但**绝不代写代码**。\n"
-            "\n"
-            "**【严禁事项】**：\n"
-            "1. ❌ 严禁提供可直接复制粘贴的代码块（Code Block）。\n"
-            "2. ❌ 严禁直接给出具体的参数值（如“你把掩码改成 255.255.255.0”），要说“修改掩码使其匹配”。\n"
-            "\n"
-            "**【必须执行的思维步骤】**：\n"
-            "1. **归因分析**：结合 RAG 证据，明确解释导致该现象的技术原因（Mechanism）。\n"
-            "2. **逻辑构建**：将修复步骤拆解为“自然语言流程”（Step-by-Step Logic）。\n"
-            "3. **引用背书**：必须引用 E1/E2 等证据来证明你的原理解释是权威的。\n"
-            "\n"
-            "**【输出话术范例】**：\n"
-            "- “这个错误是因为两端接口的 MTU 值不一致导致的（见证据 E1）。OSPF 在 ExStart 阶段会协商 MTU，如果不匹配就会卡住。”\n"
-            "- “解决这个问题的逻辑是：你需要进入两端的接口视图，分别检查当前的 MTU 设置，并将它们修改为相同的值（通常是 1500）。”\n"
-            "- “这是因为你配置了 ACL 拒绝了 ICMP 流量。你需要找到应用在入方向的那个 ACL，添加一条允许 ICMP 的规则，或者在接口上取消应用。”"
-        ),
-        
-        3: (
-            "【当前策略：Level 3 - 详细救援与情绪支持】\n"
-            "--------------------------------------------------\n"
-            "**你的角色**：你是一位负责兜底的“救援队长”。学生已经尝试多次失败，情绪可能焦躁。现在必须止损，确保实验能继续进行。\n"
-            "**核心原则**：给出答案（代码/命令），但必须“买一送一”（解释 + 鼓励 + 建议）。\n"
-            "\n"
-            "**【允许事项】**：\n"
-            "✅ 允许（且必须）提供正确的、具体的 CLI 配置命令。\n"
-            "✅ 允许直接指出哪里配错了。\n"
-            "\n"
-            "**【必须执行的思维步骤】**：\n"
-            "1. **情绪安抚**：先肯定学生的努力，缓解挫败感。\n"
-            "2. **直接方案**：给出精准的修复步骤或命令序列。\n"
-            "3. **知识回扣**：解释为什么这条命令能解决问题（防止死记硬背）。\n"
-            "4. **后续建议**：建议学生课后复习哪个知识点。\n"
-            "\n"
-            "**【输出话术范例】**：\n"
-            "- “别灰心，OSPF 的认证配置确实很容易搞混。我们先解决问题：\n"
-            "  请在 R1 上执行：\n"
-            "  ```\n"
-            "  interface g0/0\n"
-            "  ip ospf authentication message-digest\n"
-            "  ```\n"
-            "  这样做是因为（证据 E3）你的区域开启了 MD5 认证，接口下必须显式启用。课后建议复习一下‘接口认证’与‘区域认证’的区别。”\n"
-            "- “看起来这里卡了很久了，我们直接通过吧。问题出在你的静态路由下一跳写错了。请输入 `ip route 192.168.2.0 255.255.255.0 10.1.1.2`。注意下一跳必须是直连链路的对端 IP。”"
-        )
-    }
-    return strategies.get(level, strategies[0])
+    1. 【LAB_TROUBLESHOOTING】(实验操作与排错)
+       - 涉及具体设备配置命令 (Cisco/Huawei)。
+       - 涉及故障现象 (Ping不通, 状态Down)。
+       - 询问实验步骤、拓扑连接、下一步做什么。
+
+    2. 【THEORY_CONCEPT】(基础概念与原理)
+       - 询问定义、名词解释 (什么是VLAN, OSPF原理，什么是网络协议)。
+       - 比较不同技术 (TCP vs UDP)。
+       - 纯理论询问，不涉及具体环境。
+
+    3. 【CONFIG_REVIEW】(配置审计与评估)
+       - 用户提供了具体的配置代码或截图，问“对不对”。
+       - 让助教检查哪里写错了。
+       - 询问某段特定配置的作用或风险。
+
+    4. 【CALCULATION】(计算与分析)
+       - 子网划分计算 (掩码, 网段, 主机数)。
+       - 进制转换 (二进制转十进制)。
+       - 路由表选路分析 (Longest Match)。
+       - 报文长度、窗口大小等数值计算。
+
+    请只回复类别代码：LAB_TROUBLESHOOTING, THEORY_CONCEPT, CONFIG_REVIEW, 或 CALCULATION。
+    """
+    messages = [SystemMessage(content=prompt), HumanMessage(content=f"用户输入: {question}")]
+    try:
+        response = client.invoke(messages)
+        content = response.content.strip().upper()
+        if "THEORY" in content: return "THEORY_CONCEPT"
+        if "REVIEW" in content: return "CONFIG_REVIEW"
+        if "CALC" in content: return "CALCULATION"
+        return "LAB_TROUBLESHOOTING" # 默认兜底
+    except Exception:
+        return "LAB_TROUBLESHOOTING"
 
 # -------------------------------------------------------------------------
-
-def call_rag_and_record(state: AgentState, query: str) -> str:
-    raw = RAGAgent(query)  # 保持签名不变
-    raw_text = _coerce_to_text(raw)
-    evidences = state.get("evidences", [])
-    eid = f"E{len(evidences) + 1}"
-    evidences.append({
-        "id": eid,
-        "query": query,
-        "excerpt": extract_excerpt(raw),
-        "raw_text": raw_text
-    })
-    state["evidences"] = evidences
-    return raw_text
-
-def retrieve_evidence_node(state: AgentState) -> AgentState:
-    user_msg = state["user_message"]
-
-    queries = [
-        f"{user_msg} 相关定义与原理",
-        f"{user_msg} 实验步骤与检查点",
-        f"{user_msg} 常见错误原因与排查",
-    ]
-
-    for q in queries:
-        _ = call_rag_and_record(state, q)
-
-    return state
-
-class Agent():
-    def __init__(self, prompt,history):
-        self.prompt = prompt
-        self.history = []
-        self.history = history
-        self.messages = [] 
-        if self.history != []:
-            for h in self.history:
-                self.messages.append(h)
-        if  self.prompt: 
-            self.messages.append(SystemMessage(content=prompt))
-    def __call__(self, message,history) :
-        self.messages.append(HumanMessage(content=message))
-        # history.append(HumanMessage(content=message)) 
-        result = self.execute() 
-        self.messages.append(AIMessage(content=result)) 
-        # history.append(AIMessage(content=result)) 
-        return result,history
-
-    def execute(self):
-        response = client.invoke(self.messages)
-        return response.content
-
-known_actions={
-    "检索": RAGAgent,
-    "拓扑":TopoRetriever,
-}
-
-BASE_PROMPT="""
+# [新增] 动态 Base Prompt 生成器
+# -------------------------------------------------------------------------
+def get_base_prompt(category: str) -> str:
+    """
+    根据问题分类，返回完全不同的 System Prompt 框架。
+    """
+    
+    # 1. 实验与排错 (保留你原有的 BASE_PROMPT 内容)
+    prompt_lab = """
 你是“计算机网络实验课 AI 助教系统”的核心智能体，目标是通过“证据驱动的 RAG + 苏格拉底式引导”帮助学生完成实验理解与故障排查。你必须优先保证：证据准确、过程可追溯、教学不越界、结论可执行。
 
 【项目背景与目标】
@@ -324,8 +199,246 @@ BASE_PROMPT="""
 # 6) 下一步（用户回答后我将做什么，1 句话）
 """
 
+    # 2. 理论与概念
+    prompt_theory = """
+你是“计算机网络理论导师”。你的目标是帮助学生深入理解网络协议与原理，建立知识体系。
+
+【核心原则】
+1. **准确性**：定义必须严谨，参考权威教材（通过RAG检索或网络检索）。
+2. **通俗性**：善用类比（如将 IP 地址比作门牌号），但需说明类比的局限性。
+3. **关联性**：将孤立的概念联系到 OSI 模型或实际应用场景中。
+
+【可用工具】
+- RAGAgent(query: str)：检索实验文档、原理定义。
+
+【工作流程】
+1. **检索定义**：调用 RAGAgent 获取准确定义。
+2. **概念拆解**：将复杂概念拆解为“作用”、“机制”、“应用场景”。
+3. **引导思考**：引导学生思考“为什么需要这个技术”，然是用来干什么的。
+
+【当前教学策略与约束（CRITICAL）】
+{current_strategy_instruction}
+
+【输出格式（强制）】 
+1) 核心概念定位（1句话）
+2) 权威定义引用（来自 RAG，若有）
+3) 我的解析（类比或拆解）
+4) 引导提问（检查理解深度）
+5) 下一步（用户回答后我将做什么）
+"""
+
+    # 3. 配置审查
+    prompt_review = """
+你是“网络工程配置审计员”。学生通常会提供一段配置或截图，你的目标是找出其中的逻辑错误或语法错误。
+
+【核心原则】
+1. **不直接更正**：指出错误所在的行或段落，但不直接给出正确代码（除非 Level 高）。
+2. **后果导向**：解释这个错误会导致什么网络后果（如“导致环路”、“邻居无法建立”）。
+3. **最佳实践**：除了纠错，还可以指出配置是否符合规范。
+
+【可用工具】
+- RAGAgent(query: str)：检索标准配置模板。
+
+【当前教学策略与约束（CRITICAL）】
+{current_strategy_instruction}
+
+【输出格式（强制）】
+你必须**首先**输出一个 `<thinking>...</thinking>` 代码块。
+**然后**，在思考块之外，输出以下结构化内容：
+
+1) 配置意图分析
+2) 发现的问题点（定位）
+3) 潜在后果分析
+4) 修正引导提示（按当前策略）
+5) 下一步
+"""
+
+    # 4. 计算与分析
+    prompt_calc = """
+你是“网络计算辅导员”。专注于子网划分、路由选路、数制转换等逻辑计算问题。
+
+【核心原则】
+1. **过程重于结果**：严禁直接给出计算结果数字。
+2. **公式引导**：引导学生列出计算公式或画出二进制图。
+3. **分步验证**：让学生一步步算出中间结果，你来核对。
+
+【可用工具】
+- RAGAgent(query: str)：检索计算公式/规则。
+
+【当前教学策略与约束（CRITICAL）】
+{current_strategy_instruction}
+
+【输出格式（强制）】
+你必须**首先**输出一个 `<thinking>...</thinking>` 代码块。
+**然后**，在思考块之外，输出以下结构化内容：
+
+1) 计算目标明确
+2) 涉及的公式/规则（引用 RAG）
+3) 第一步引导
+4) 检查点提问
+5) 下一步
+"""
+
+    mapping = {
+        "LAB_TROUBLESHOOTING": prompt_lab,
+        "THEORY_CONCEPT": prompt_theory,
+        "CONFIG_REVIEW": prompt_review,
+        "CALCULATION": prompt_calc
+    }
+    
+    return mapping.get(category, prompt_lab)
+
+# -------------------------------------------------------------------------
+# [原功能] Hint Level 管理逻辑
+# -------------------------------------------------------------------------
+def determine_hint_level(state: Dict[str, Any], user_question: str) -> int:
+    current_turn = state.get("user_turn_count", 0) + 1
+    state["user_turn_count"] = current_turn
+    turn_based_floor = (current_turn - 1) // 3
+    previous_level = state.get("hint_level", 0)
+    help_keywords = [
+        "不懂", "不会", "不知道", "提示", "又错了", "还是不对", 
+        "怎么办", "怎么做", "为什么", "结果是啥", "给个答案",
+        "太难", "迷糊", "仔细", "解释", "看不懂", "好难"
+    ]
+    q_lower = user_question.lower()
+    keyword_triggered_level = previous_level
+    if any(k in q_lower for k in help_keywords):
+        keyword_triggered_level = previous_level + 1
+    final_level = max(turn_based_floor, keyword_triggered_level)
+    final_level = min(final_level, 3)
+    return final_level
+
+# -------------------------------------------------------------------------
+# [升级版] Hint Strategy 生成器 (支持分类)
+# -------------------------------------------------------------------------
+def get_strategy_prompt(level: int, category: str) -> str:
+    """
+    根据 Level 和 Category 返回具体的指导策略。
+    """
+    # 1. LAB_TROUBLESHOOTING (保留你原有的策略)
+    s_lab = {
+        0: (
+            "【当前策略：Level 0 - 纯粹引导与概念启发】\n"
+            "**角色**：严格的考官。**严禁**提及错误原因或排查命令。\n"
+            "**任务**：引导学生回顾实验原理。\n"
+            "**话术**：“要实现两台 PC 的互通，在网络层我们需要确保什么条件满足？”"
+        ),
+        1: (
+            "【当前策略：Level 1 - 现象聚焦与线索提示】\n"
+            "**角色**：现场观察员。**严禁**解释原理。\n"
+            "**任务**：指出具体的观察点（字段/连线）。\n"
+            "**话术**：“请仔细观察 `show ip ospf neighbor` 输出中的 `State` 字段。”"
+        ),
+        2: (
+            "【当前策略：Level 2 - 原理解析与逻辑指导】\n"
+            "**角色**：理论讲师。**严禁**提供代码块。\n"
+            "**任务**：解释原理，口述修复逻辑。\n"
+            "**话术**：“这个错误是因为两端接口的 MTU 值不一致导致的。”"
+        ),
+        3: (
+            "【当前策略：Level 3 - 详细救援与情绪支持】\n"
+            "**角色**：救援队长。**允许**提供代码块。\n"
+            "**任务**：给出修复命令 + 解释 + 鼓励。\n"
+            "**话术**：“别灰心，输入以下命令...”"
+        )
+    }
+
+    # 2. THEORY_CONCEPT (理论类)
+    s_theory = {
+        0: "【Level 0】: 启发式提问。问学生‘从字面意思理解，你觉得它是做什么的？’。严禁给定义。",
+        1: "【Level 1】: 关键词提示。给出该概念的 1-2 个核心关键词（如‘链路状态’、‘最短路径’）。",
+        2: "【Level 2】: 详解与类比。引用 RAG 定义，并配合生活类比进行解释。",
+        3: "【Level 3】: 权威总结。给出标准定义，并指出该概念在 OSI 第几层，有什么优缺点。"
+    }
+
+    # 3. CONFIG_REVIEW (审查类)
+    s_review = {
+        0: "【Level 0】: 质疑引导。问‘你确定这一行配置的参数符合实验要求吗？’，不指明哪一行。",
+        1: "【Level 1】: 错误定位。指出‘第 3 行的掩码配置似乎有问题’，不告诉怎么改。",
+        2: "【Level 2】: 后果解释。‘这里配成了 /24，但题目要求 /30，这会导致路由不可达’。",
+        3: "【Level 3】: 代码纠错。给出正确的配置代码片段，并强调对比差异。"
+    }
+
+    # 4. CALCULATION (计算类)
+    s_calc = {
+        0: "【Level 0】: 规则确认。问‘计算子网数需要用到哪个公式？2的n次方还是什么？’。",
+        1: "【Level 1】: 转换提示。‘请先把 192.168.1.0 转换成二进制写出来看看’。",
+        2: "【Level 2】: 步骤校对。‘你的借位是 3 位，所以子网数是 8 个。现在算一下主机数’。",
+        3: "【Level 3】: 完整演示。列出完整的计算过程和结果，并解析每一步。"
+    }
+
+    strategies = {
+        "LAB_TROUBLESHOOTING": s_lab,
+        "THEORY_CONCEPT": s_theory,
+        "CONFIG_REVIEW": s_review,
+        "CALCULATION": s_calc
+    }
+    
+    target_dict = strategies.get(category, s_lab)
+    return target_dict.get(level, target_dict[0])
+
+# -------------------------------------------------------------------------
+# [原功能] 其他辅助函数
+# -------------------------------------------------------------------------
+def call_rag_and_record(state: AgentState, query: str) -> str:
+    raw = RAGAgent(query)
+    raw_text = _coerce_to_text(raw)
+    evidences = state.get("evidences", [])
+    eid = f"E{len(evidences) + 1}"
+    evidences.append({
+        "id": eid,
+        "query": query,
+        "excerpt": extract_excerpt(raw),
+        "raw_text": raw_text
+    })
+    state["evidences"] = evidences
+    return raw_text
+
+def retrieve_evidence_node(state: AgentState) -> AgentState:
+    user_msg = state["user_message"]
+    queries = [
+        f"{user_msg} 相关定义与原理",
+        f"{user_msg} 实验步骤与检查点",
+        f"{user_msg} 常见错误原因与排查",
+    ]
+    for q in queries:
+        _ = call_rag_and_record(state, q)
+    return state
+
+class Agent():
+    def __init__(self, prompt,history):
+        self.prompt = prompt
+        self.history = []
+        self.history = history
+        self.messages = [] 
+        if self.history != []:
+            for h in self.history:
+                self.messages.append(h)
+        if  self.prompt: 
+            self.messages.append(SystemMessage(content=prompt))
+    def __call__(self, message,history) :
+        self.messages.append(HumanMessage(content=message))
+        # history.append(HumanMessage(content=message)) 
+        result = self.execute() 
+        self.messages.append(AIMessage(content=result)) 
+        # history.append(AIMessage(content=result)) 
+        return result,history
+
+    def execute(self):
+        response = client.invoke(self.messages)
+        return response.content
+
+known_actions={
+    "检索": RAGAgent,
+    "拓扑":TopoRetriever,
+}
+
 action_re = re.compile(r'^工具：(\w+)：(.*)$')
 
+# -------------------------------------------------------------------------
+# [修改] 主流程 Query (整合分类逻辑)
+# -------------------------------------------------------------------------
 def query(
     question: str,
     history: Optional[List[BaseMessage]] = None,
@@ -333,17 +446,13 @@ def query(
     debug: bool = False,
     state: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, List[BaseMessage], List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    Return: (reply_text, new_history_messages, tool_traces, new_state)
-    """
+    
     if history is None:
         history = []
     if state is None:
         state = {}
 
-    # ---------------------------------------------------------------------
-    # [新增] 1. 课程相关性检查 (Guardrail)
-    # ---------------------------------------------------------------------
+    # 1. 相关性检查
     is_relevant = check_relevance(question)
     if not is_relevant:
         reply = "与本课程无关，不予回答。"
@@ -353,9 +462,7 @@ def query(
             print(f"[Guardrail] Blocked irrelevant query: '{question}'")
         return reply, history, [], state
 
-    # ---------------------------------------------------------------------
-    # [原功能] 2. Intent routing: ping scenario (无修改)
-    # ---------------------------------------------------------------------
+    # 2. Ping 场景特殊处理
     q = (question or "").strip()
     q_low = q.lower()
     ping_trigger = (
@@ -376,15 +483,31 @@ def query(
         return reply, history, tool_traces, (new_state or {})
 
     # -----------------------------
-    # [原功能] 3. Hint Level Strategy (无修改)
+    # 3. 计算 Hint Level & 判断问题分类
     # -----------------------------
+    # (A) 计算 Level
     current_hint_level = determine_hint_level(state, q)
     state["hint_level"] = current_hint_level
-    strategy_instruction = get_strategy_prompt(current_hint_level)
-    final_prompt = BASE_PROMPT.format(current_strategy_instruction=strategy_instruction)
+    
+    # (B) 识别问题分类 (LAB / THEORY / REVIEW / CALC)
+    category = detect_question_category(q)
+    state["question_category"] = category
+    
+    # (C) 获取 System Prompt 模板
+    base_prompt_template = get_base_prompt(category)
+    
+    # (D) 获取 Strategy Instruction
+    strategy_instruction = get_strategy_prompt(current_hint_level, category)
+    
+    # (E) 组装最终 Prompt
+    final_prompt = base_prompt_template.format(current_strategy_instruction=strategy_instruction)
+
+    if debug:
+        print(f"[DEBUG] Cat: {category} | Lvl: {current_hint_level}")
+        print(f"[DEBUG] Strategy: {strategy_instruction[:50]}...")
 
     # -----------------------------
-    # [原功能] 4. Agent Loop (无修改)
+    # 4. Agent 执行循环
     # -----------------------------
     i = 0
     bot = Agent(final_prompt, history)
@@ -475,3 +598,9 @@ if __name__ == "__main__":
     q2 = "宫保鸡丁怎么做？"
     output2, _, _, _ = query(q2, debug=True)
     print(f"\n[Q: {q2}] => {output2}")
+    
+    # 测试分类器效果
+    print("\n--- Testing Classifier & Prompt Switching ---")
+    q3 = "怎么划分子网？" # 应该触发 CALCULATION 或 LAB
+    output3, _, _, state3 = query(q3, debug=True)
+    print(f"\n[Q: {q3}] Cat: {state3.get('question_category')}")
