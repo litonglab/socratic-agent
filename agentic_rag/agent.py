@@ -8,6 +8,8 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 
 from agentic_rag.rag import RAGAgent
 from agentic_rag.topo_rag import TopoRetriever
+# 1. 【新增】引入搜索工具
+from agentic_rag.web_search import WebSearch 
 from dataclasses import dataclass, field
 from agentic_rag.utils import extract_excerpt, _coerce_to_text
 from agentic_rag.socratic.ping_controller import handle_ping_socratic
@@ -232,6 +234,7 @@ class Agent():
 known_actions={
     "检索": RAGAgent,
     "拓扑":TopoRetriever,
+    "搜索": WebSearch, 
 }
 
 action_re = re.compile(r'^工具：(\w+)：(.*)$')
