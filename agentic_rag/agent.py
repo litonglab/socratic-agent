@@ -24,7 +24,8 @@ from .prompts import (
     STRATEGY_LAB,
     STRATEGY_THEORY,
     STRATEGY_REVIEW,
-    STRATEGY_CALC
+    STRATEGY_CALC,
+    HINT_JUDGE_PROMPT  # <--- [新增] 从 prompts.py 导入
 )
 
 class Evidence(TypedDict):
@@ -37,15 +38,10 @@ class AgentState(TypedDict, total=False):
     user_message: str
     evidences: List[Evidence]
     hint_level: int
-    user_turn_count: int
-    question_category: str # [新增] 记录问题分类
-    mode: str  # "socratic" | "direct"
-
-KEYWORDS = [
-    "步骤", "检查", "预期", "原因", "常见", "故障", "排查",
-    "OSPF", "BGP", "VLAN", "NAT", "ACL", "ARP", "STP",
-    "show", "display", "ping", "traceroute", "邻居", "路由表"
-]
+    user_turn_count: int         # 总轮次
+    turns_at_current_level: int  # [新增] 在当前 Level 停留的连续轮次
+    question_category: str       # 记录问题分类
+    mode: str                    # "socratic" | "direct"
 
 client = build_chat_llm(temperature=0)
 
@@ -109,16 +105,16 @@ def get_base_prompt(category: str) -> str:
     根据问题分类，返回完全不同的 System Prompt 框架。
     """
     
-    # 1. 实验与排错 (保留你原有的 BASE_PROMPT 内容)
+    # 1. 实验与排错
     prompt_lab = BASE_PROMPT_LAB
 
-    # 2. 理论与概念 (优化版 - 对齐 Lab 格式与工具调用)
+    # 2. 理论与概念
     prompt_theory = BASE_PROMPT_THEORY
     
-    # 3. 配置审查 (优化版 - 引入拓扑校验与逻辑审计)
+    # 3. 配置审查
     prompt_review = BASE_PROMPT_REVIEW
     
-    # 4. 计算与分析 (优化版 - 引入场景化计算与分步验证)
+    # 4. 计算与分析
     prompt_calc = BASE_PROMPT_CALC
 
     mapping = {
@@ -131,25 +127,77 @@ def get_base_prompt(category: str) -> str:
     return mapping.get(category, prompt_lab)
 
 # -------------------------------------------------------------------------
-# [原功能] Hint Level 管理逻辑
+# [修改] Hint Level 管理逻辑 (AI 裁判 + 轮次兜底)
 # -------------------------------------------------------------------------
-def determine_hint_level(state: Dict[str, Any], user_question: str) -> int:
-    current_turn = state.get("user_turn_count", 0) + 1
-    state["user_turn_count"] = current_turn
-    turn_based_floor = (current_turn - 1) // 3
-    previous_level = state.get("hint_level", 0)
-    help_keywords = [
-        "不懂", "不会", "不知道", "提示", "又错了", "还是不对", 
-        "怎么办", "怎么做", "为什么", "结果是啥", "给个答案",
-        "太难", "迷糊", "仔细", "解释", "看不懂", "好难"
+def determine_hint_level(state: Dict[str, Any], user_question: str, history: List[BaseMessage]) -> int:
+    """
+    决定当前的提示等级。
+    逻辑：
+    1. AI Judge 根据对话质量判断是否 INCREASE。
+    2. 如果 AI 判断 MAINTAIN，但 turns_at_current_level >= 3 (连续3轮不涨)，则强制 INCREASE。
+    3. 最大 Level 限制为 3。
+    """
+    current_level = state.get("hint_level", 0)
+    turns_at_level = state.get("turns_at_current_level", 0)
+    
+    # 达到最高等级后不再判断，直接返回
+    if current_level >= 3:
+        state["turns_at_current_level"] = turns_at_level + 1
+        return 3
+
+    # 准备 AI 裁判的输入上下文 (取最近 4条消息)
+    recent_history_str = ""
+    start_idx = max(0, len(history) - 4)
+    for msg in history[start_idx:]:
+        role = "User" if isinstance(msg, HumanMessage) else "AI"
+        recent_history_str += f"{role}: {msg.content}\n"
+    
+    # 使用从 prompts.py 导入的 HINT_JUDGE_PROMPT
+    judge_prompt = HINT_JUDGE_PROMPT.format(current_level=current_level)
+    judge_input = f"对话历史:\n{recent_history_str}\n当前用户输入: {user_question}"
+    
+    messages = [
+        SystemMessage(content=judge_prompt),
+        HumanMessage(content=judge_input)
     ]
-    q_lower = user_question.lower()
-    keyword_triggered_level = previous_level
-    if any(k in q_lower for k in help_keywords):
-        keyword_triggered_level = previous_level + 1
-    final_level = max(turn_based_floor, keyword_triggered_level)
-    final_level = min(final_level, 3)
-    return final_level
+
+    # 1. 调用 AI 裁判
+    decision = "MAINTAIN"
+    try:
+        response = client.invoke(messages)
+        content = response.content.strip().upper()
+        if "INCREASE" in content:
+            decision = "INCREASE"
+        else:
+            decision = "MAINTAIN"
+    except Exception as e:
+        print(f"[Warning] Hint Judge failed: {e}, keeping level.")
+        decision = "MAINTAIN"
+
+    # 2. 计算新 Level (结合 AI 决策与轮次兜底)
+    new_level = current_level
+    
+    if decision == "INCREASE":
+        new_level = current_level + 1
+        turns_at_level = 0 # 重置计数器
+        print(f"[Hint Logic] AI decided to INCREASE to level {new_level}")
+    else:
+        # AI 决定保持，检查兜底逻辑
+        turns_at_level += 1
+        if turns_at_level >= 3:
+            new_level = current_level + 1
+            turns_at_level = 0 # 重置计数器
+            print(f"[Hint Logic] Failsafe triggered (3 turns stuck). FORCED INCREASE to level {new_level}")
+        else:
+            print(f"[Hint Logic] Maintaining level {current_level} (Streak: {turns_at_level}/3)")
+
+    # 确保不超过 3
+    new_level = min(new_level, 3)
+    
+    # 更新 State
+    state["turns_at_current_level"] = turns_at_level
+    
+    return new_level
 
 # -------------------------------------------------------------------------
 # [升级版] Hint Strategy 生成器 (支持分类)
@@ -158,16 +206,16 @@ def get_strategy_prompt(level: int, category: str) -> str:
     """
     根据 Level 和 Category 返回具体的指导策略。
     """
-    # 1. LAB_TROUBLESHOOTING (保留你原有的策略)
+    # 1. LAB_TROUBLESHOOTING
     s_lab = STRATEGY_LAB
 
-    # 2. THEORY_CONCEPT (理论类策略 - 从定义到应用)
+    # 2. THEORY_CONCEPT
     s_theory = STRATEGY_THEORY
 
-    # 3. CONFIG_REVIEW (配置审查类策略 - 从审计到修正)
+    # 3. CONFIG_REVIEW
     s_review = STRATEGY_REVIEW
 
-    # 4. CALCULATION (计算类策略 - 从公式到结果)
+    # 4. CALCULATION
     s_calc = STRATEGY_CALC
     
     strategies = {
@@ -240,7 +288,7 @@ known_actions={
 action_re = re.compile(r'^工具：(\w+)：(.*)$')
 
 # -------------------------------------------------------------------------
-# [修改] 主流程 Query (整合分类逻辑)
+# [修改] 主流程 Query (整合分类逻辑 + 新Hint逻辑)
 # -------------------------------------------------------------------------
 def query(
     question: str,
@@ -254,6 +302,12 @@ def query(
         history = []
     if state is None:
         state = {}
+
+    # 初始化 state 中的计数器 (如果是第一次调用)
+    if "turns_at_current_level" not in state:
+        state["turns_at_current_level"] = 0
+    if "user_turn_count" not in state:
+        state["user_turn_count"] = 0
 
     # 1. 相关性检查
     is_relevant = check_relevance(question)
@@ -288,8 +342,10 @@ def query(
     # -----------------------------
     # 3. 计算 Hint Level & 判断问题分类
     # -----------------------------
-    # (A) 计算 Level
-    current_hint_level = determine_hint_level(state, q)
+    state["user_turn_count"] += 1 # 增加总轮次
+
+    # (A) 计算 Level (现在传入 history 以便 AI 判断)
+    current_hint_level = determine_hint_level(state, q, history)
     state["hint_level"] = current_hint_level
     
     # (B) 识别问题分类 (LAB / THEORY / REVIEW / CALC)
@@ -404,6 +460,6 @@ if __name__ == "__main__":
     
     # 测试分类器效果
     print("\n--- Testing Classifier & Prompt Switching ---")
-    q3 = "怎么划分子网？" # 应该触发 CALCULATION 或 LAB
+    q3 = "怎么划分子网？" 
     output3, _, _, state3 = query(q3, debug=True)
     print(f"\n[Q: {q3}] Cat: {state3.get('question_category')}")
