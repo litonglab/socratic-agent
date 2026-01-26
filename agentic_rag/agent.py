@@ -256,24 +256,31 @@ def retrieve_evidence_node(state: AgentState) -> AgentState:
         _ = call_rag_and_record(state, q)
     return state
 
+# -------------------------------------------------------------------------
+# [关键修改] Agent 类 - 修复 SystemMessage 顺序和 History 处理
+# -------------------------------------------------------------------------
 class Agent():
-    def __init__(self, prompt,history):
+    def __init__(self, prompt, history):
         self.prompt = prompt
-        self.history = []
-        self.history = history
         self.messages = [] 
-        if self.history != []:
-            for h in self.history:
-                self.messages.append(h)
-        if  self.prompt: 
+        
+        # 1. SystemMessage 必须放在最前面，确保 AI 首先看到身份设定
+        if self.prompt: 
             self.messages.append(SystemMessage(content=prompt))
-    def __call__(self, message,history) :
+            
+        # 2. 紧接着追加历史记录
+        if history:
+            self.messages.extend(history)
+
+    def __call__(self, message) :
+        # 注意：这里我们只处理当前的 LLM 调用逻辑
+        # 历史记录的永久保存逻辑移到了 query 函数最后，避免重复和混乱
         self.messages.append(HumanMessage(content=message))
-        # history.append(HumanMessage(content=message)) 
+        
         result = self.execute() 
         self.messages.append(AIMessage(content=result)) 
-        # history.append(AIMessage(content=result)) 
-        return result,history
+        
+        return result
 
     def execute(self):
         response = client.invoke(self.messages)
@@ -288,7 +295,7 @@ known_actions={
 action_re = re.compile(r'^工具：(\w+)：(.*)$')
 
 # -------------------------------------------------------------------------
-# [修改] 主流程 Query (整合分类逻辑 + 新Hint逻辑)
+# [修改] 主流程 Query (整合分类逻辑 + 新Hint逻辑 + 修复记忆功能)
 # -------------------------------------------------------------------------
 def query(
     question: str,
@@ -313,6 +320,7 @@ def query(
     is_relevant = check_relevance(question)
     if not is_relevant:
         reply = "与本课程无关，不予回答。"
+        # 无关问题也存入历史，保持对话连贯性（可选）
         history.append(HumanMessage(content=question))
         history.append(AIMessage(content=reply))
         if debug:
@@ -369,10 +377,13 @@ def query(
     # 4. Agent 执行循环
     # -----------------------------
     i = 0
+    # 将 history 传入 Agent 初始化，确保 AI 知道上下文
     bot = Agent(final_prompt, history)
+    
     next_prompt = q
     tool_traces: List[Dict[str, Any]] = []
     last_citations: List[Dict[str, Any]] = []
+    final_result = "" # 用于保存最终生成的回答
 
     def _format_citations(citations: List[Dict[str, Any]]) -> str:
         if not citations:
@@ -382,7 +393,9 @@ def query(
 
     while i < max_turns:
         i += 1
-        result, _ = bot(next_prompt, history)
+        # 调用 Agent，获取回答
+        result = bot(next_prompt)
+        final_result = result # 暂存结果
 
         if debug:
             print(f"Turn {i}: {result[:50]}...")
@@ -410,17 +423,26 @@ def query(
                 "output": obs_output_str[:2000],
             })
 
+            # 工具调用后，更新 next_prompt 并继续循环
             next_prompt = f"检索结果：{obs_output_str}"
             continue
 
-        if last_citations and "引用：" not in (result or ""):
-            result = (result or "").rstrip() + "\n\n" + _format_citations(last_citations)
+        # 如果没有动作，说明是最终回答
+        break
+    
+    # 添加引用（如果有）
+    if last_citations and "引用：" not in (final_result or ""):
+        final_result = (final_result or "").rstrip() + "\n\n" + _format_citations(last_citations)
         
-        return result, history, tool_traces, (state or {})
+    # -------------------------------------------------------------------------
+    # 【关键修复】更新历史记忆
+    # -------------------------------------------------------------------------
+    # 只有当成功获得回答后，才将这一轮的 User/AI 交互存入 history
+    if final_result:
+        history.append(HumanMessage(content=question))
+        history.append(AIMessage(content=final_result))
 
-    if last_citations and "引用：" not in (result or ""):
-        result = (result or "").rstrip() + "\n\n" + _format_citations(last_citations)
-    return result, history, tool_traces, (state or {})
+    return final_result, history, tool_traces, (state or {})
 
 
 def messages_to_dicts(messages: List[BaseMessage]) -> List[Dict[str, str]]:
@@ -451,15 +473,17 @@ if __name__ == "__main__":
     # 测试相关性守卫
     print("--- Testing Relevance Guardrail ---")
     q1 = "什么是网络协议？"
-    output1, _, _, _ = query(q1, debug=True)
+    # 初始化历史
+    history_store = []
+    output1, history_store, _, _ = query(q1, history=history_store, debug=True)
     print(f"\n[Q: {q1}] => {output1[:50]}...") 
     
     q2 = "宫保鸡丁怎么做？"
-    output2, _, _, _ = query(q2, debug=True)
+    output2, history_store, _, _ = query(q2, history=history_store, debug=True)
     print(f"\n[Q: {q2}] => {output2}")
     
     # 测试分类器效果
     print("\n--- Testing Classifier & Prompt Switching ---")
     q3 = "怎么划分子网？" 
-    output3, _, _, state3 = query(q3, debug=True)
+    output3, history_store, _, state3 = query(q3, history=history_store, debug=True)
     print(f"\n[Q: {q3}] Cat: {state3.get('question_category')}")
