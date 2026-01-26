@@ -46,9 +46,29 @@ class AgentState(TypedDict, total=False):
 client = build_chat_llm(temperature=0)
 
 # -------------------------------------------------------------------------
-# [原功能] 相关性检查函数 (保持不变)
+# [新增] 辅助函数：格式化历史记录用于 Context
 # -------------------------------------------------------------------------
-def check_relevance(question: str) -> bool:
+def _format_history_context(history: List[BaseMessage], limit: int = 3) -> str:
+    """
+    提取最近几轮对话作为上下文背景。
+    """
+    if not history:
+        return "（无历史对话）"
+    
+    context_str = ""
+    # 取最后 limit * 2 条消息（User+AI）以防止 token 溢出
+    recent_msgs = history[-(limit*2):]
+    for m in recent_msgs:
+        role = "AI" if isinstance(m, AIMessage) else "User"
+        # 简单截断过长的内容
+        content = m.content[:200] + "..." if len(m.content) > 200 else m.content
+        context_str += f"{role}: {content}\n"
+    return context_str
+
+# -------------------------------------------------------------------------
+# [修改] 相关性检查函数 (增加 history 参数)
+# -------------------------------------------------------------------------
+def check_relevance(question: str, history: List[BaseMessage]) -> bool:
     """
     判断用户问题是否与计算机网络课程相关（含理论与实验）。
     返回: True (相关) | False (无关)
@@ -62,12 +82,15 @@ def check_relevance(question: str) -> bool:
     if len(q_str) < 15 and any(g in q_str.lower() for g in greetings):
         return True
 
-    # 使用LLM进行意图分类
-    relevance_prompt = RELEVANCE_PROMPT
-    
+    # 1. 准备上下文
+    context_str = _format_history_context(history, limit=2)
+
+    # 2. 构造 Prompt
+    prompt_content = f"【对话历史】:\n{context_str}\n\n【用户当前输入】: {q_str}"
+
     messages = [
-        SystemMessage(content=relevance_prompt),
-        HumanMessage(content=f"用户输入: {q_str}")
+        SystemMessage(content=RELEVANCE_PROMPT),
+        HumanMessage(content=prompt_content)
     ]
     
     try:
@@ -79,14 +102,22 @@ def check_relevance(question: str) -> bool:
         return True
 
 # -------------------------------------------------------------------------
-# [新增] 问题分类器 (4类)
+# [修改] 问题分类器 (增加 history 参数)
 # -------------------------------------------------------------------------
-def detect_question_category(question: str) -> str:
+def detect_question_category(question: str, history: List[BaseMessage]) -> str:
     """
-    将问题归类为四大场景之一。
+    将问题归类为四大场景之一，结合上下文判断。
     """
-    prompt = CATEGORY_DETECT_PROMPT
-    messages = [SystemMessage(content=prompt), HumanMessage(content=f"用户输入: {question}")]
+    # 1. 准备上下文
+    context_str = _format_history_context(history, limit=2)
+    
+    # 2. 构造 Prompt
+    prompt_content = f"【对话历史】:\n{context_str}\n\n【用户当前输入】: {question}"
+
+    messages = [
+        SystemMessage(content=CATEGORY_DETECT_PROMPT),
+        HumanMessage(content=prompt_content)
+    ]
     try:
         response = client.invoke(messages)
         content = response.content.strip().upper()
@@ -127,15 +158,11 @@ def get_base_prompt(category: str) -> str:
     return mapping.get(category, prompt_lab)
 
 # -------------------------------------------------------------------------
-# [修改] Hint Level 管理逻辑 (AI 裁判 + 轮次兜底)
+# [修改] Hint Level 管理逻辑 (使用新的 _format_history_context)
 # -------------------------------------------------------------------------
 def determine_hint_level(state: Dict[str, Any], user_question: str, history: List[BaseMessage]) -> int:
     """
     决定当前的提示等级。
-    逻辑：
-    1. AI Judge 根据对话质量判断是否 INCREASE。
-    2. 如果 AI 判断 MAINTAIN，但 turns_at_current_level >= 3 (连续3轮不涨)，则强制 INCREASE。
-    3. 最大 Level 限制为 3。
     """
     current_level = state.get("hint_level", 0)
     turns_at_level = state.get("turns_at_current_level", 0)
@@ -145,12 +172,8 @@ def determine_hint_level(state: Dict[str, Any], user_question: str, history: Lis
         state["turns_at_current_level"] = turns_at_level + 1
         return 3
 
-    # 准备 AI 裁判的输入上下文 (取最近 4条消息)
-    recent_history_str = ""
-    start_idx = max(0, len(history) - 4)
-    for msg in history[start_idx:]:
-        role = "User" if isinstance(msg, HumanMessage) else "AI"
-        recent_history_str += f"{role}: {msg.content}\n"
+    # 准备 AI 裁判的输入上下文 (使用新的辅助函数)
+    recent_history_str = _format_history_context(history, limit=2)
     
     # 使用从 prompts.py 导入的 HINT_JUDGE_PROMPT
     judge_prompt = HINT_JUDGE_PROMPT.format(current_level=current_level)
@@ -316,8 +339,8 @@ def query(
     if "user_turn_count" not in state:
         state["user_turn_count"] = 0
 
-    # 1. 相关性检查
-    is_relevant = check_relevance(question)
+    # 1. 相关性检查 (传入 History)
+    is_relevant = check_relevance(question, history)
     if not is_relevant:
         reply = "与本课程无关，不予回答。"
         # 无关问题也存入历史，保持对话连贯性（可选）
@@ -352,13 +375,16 @@ def query(
     # -----------------------------
     state["user_turn_count"] += 1 # 增加总轮次
 
-    # (A) 计算 Level (现在传入 history 以便 AI 判断)
+    # (B) 识别问题分类 (传入 History)
+    # 结合 History，AI 不会再把 "2" 误判为 LAB，而是保持为 CALCULATION
+    category = detect_question_category(q, history)
+    
+    # 按照要求：这里不进行 Level 重置，直接更新分类即可
+    state["question_category"] = category
+
+    # (A) 计算 Level (传入 History)
     current_hint_level = determine_hint_level(state, q, history)
     state["hint_level"] = current_hint_level
-    
-    # (B) 识别问题分类 (LAB / THEORY / REVIEW / CALC)
-    category = detect_question_category(q)
-    state["question_category"] = category
     
     # (C) 获取 System Prompt 模板
     base_prompt_template = get_base_prompt(category)
