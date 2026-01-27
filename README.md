@@ -27,60 +27,37 @@
 
 ```
 RAG-Agent/
-├── config.py                 # 全局配置，如模型名称、API key、路径等
-├── main.py                   # 系统主入口，提供 ingest, build_index, query 等接口
-├── requirements.txt          # 项目依赖
-├── README.md                 # 项目介绍、安装、使用说明
-├── data/                     # 原始 Word 文档存放目录
-│   └── *.docx
-├── processed_data/           # 解析后的中间数据和图片存放目录
-│   ├── images/
-│   │   └── *.png
-│   └── chunks.json           # 所有 chunk 的 JSON 列表
-├── index_store/              # 索引文件存放目录
-│   ├── chroma_db/            # Chroma 向量数据库持久化目录
-│   └── bm25_index.pkl        # BM25 索引文件
-├── src/
-│   ├── data_loader/
-│   │   ├── document_parser.py    # Word 文档解析，提取文本、图片、表格
-│   │   ├── file_utils.py         # 文件操作工具
-│   │   └── README.md             # data_loader 模块的说明文档
-│   ├── chunking/
-│   │   ├── text_splitter.py      # 文档分块策略实现
-│   │   └── README.md             # chunking 模块的说明文档
-│   ├── indexing/
-│   │   ├── indexer.py            # 索引构建器 (BM25 + Vector)
-│   │   ├── vector_store.py       # 向量数据库操作封装
-│   │   ├── bm25_store.py         # BM25 索引操作封装
-│   │   └── README.md             # indexing 模块的说明文档
-│   ├── retrieval/
-│   │   ├── retriever.py          # 混合检索逻辑，RRF 重排
-│   │   └── README.md             # retrieval 模块的说明文档
-│   ├── rag/
-│   │   ├── generator.py          # RAG 生成器，LLM 调用及提示词管理
-│   │   └── README.md             # rag 模块的说明文档
-│   ├── models/                   # 存放嵌入模型和 LLM 客户端的初始化
-│   │   ├── embedding_model.py
-│   │   ├── llm_client.py
-│   │   └── README.md             # models 模块的说明文档
+├── agentic_rag/              # 核心 Agent/RAG/Topo 模块
+│   ├── agent.py              # 入口：问题分类 + 提示策略 + 工具调用 + 对话状态
+│   ├── rag.py                # 文本 RAG：docx→分块→FAISS→MMR 检索 + 引用
+│   ├── topo_rag.py           # 拓扑图解析/索引/检索（含拓扑 JSON/Graph）
+│   ├── socratic/
+│   │   └── ping_controller.py # Ping 场景苏格拉底排错控制器
+│   ├── llm_config.py         # DeepSeek/OpenAI Chat LLM 构建
+│   ├── embedding.py          # 简易向量化脚本（FAISS）
+│   ├── utils.py              # RAG 输出清洗与证据摘要
 │   └── __init__.py
-├── evaluation/
-│   ├── qa_dataset.json       # 评估数据集
-│   ├── evaluator.py
-│   └── README.md                 # evaluation 模块的说明文档
-└── tests/                    # 单元测试和集成测试
-    └── test_*.py
+├── server.py                 # FastAPI 后端 API（/api/chat）
+├── app_streamlit.py          # Streamlit 前端
+├── data/                     # 原始实验指导书（.docx）
+├── faiss_index/              # 文本向量索引（FAISS）
+├── topo_store_lab1/          # 拓扑索引与解析结果（示例）
+├── topo_store_lab13/         # 默认拓扑索引与解析结果
+├── scripts/
+│   └── download_bge_m3.py     # 本地嵌入模型下载脚本
+├── generate_qa_dataset.py    # QA 数据集生成脚本（路径参数当前写死）
+├── sessions.json             # Streamlit 会话持久化（可选）
+├── evaluator/                # 预留评审模块（当前为空）
+└── socratic_tutor/            # 预留 Tutor 模块（当前为空）
 ```
 
-### `main.py` 职责概述
-`main.py` 是整个 RAG 系统的入口文件。它负责协调各个模块，提供以下主要功能：
-1.  **文档摄取 (Ingest)**: 调用 `data_loader` 和 `chunking` 模块来解析原始文档并生成 chunk。
-2.  **构建索引 (Build Index)**: 调用 `indexing` 模块来构建和持久化 BM25 和向量索引。
-3.  **查询 (Query)**: 接收用户问题，调用 `retrieval` 模块获取相关 chunk，然后调用 `rag` 模块生成最终回答。
-4.  **评估 (Evaluate)**: （可选）集成 `evaluation` 模块，对系统性能进行评估。
-5.  **命令行接口 (CLI)**: 可以设计为通过命令行参数来触发上述功能。
-
-`main.py` 不包含具体的业务逻辑，而是作为粘合剂，将各个功能模块串联起来，形成一个完整的 RAG 问答系统。
+### `agentic_rag/agent.py` 职责概述
+`agentic_rag/agent.py` 是当前系统的核心入口与调度器，负责：
+1. **相关性守卫**：判断问题是否与网络课程相关，不相关则拒答。
+2. **问题分类与提示策略**：将问题分为 LAB/THEORY/REVIEW/CALC，动态选择系统提示词与 Hint Level。
+3. **工具调用**：按“工具：检索/拓扑：query”规范调用 `RAGAgent` 与 `TopoRetriever`。
+4. **苏格拉底引导**：对 Ping 场景切换到 `socratic/ping_controller.py` 的槽位式排错流程。
+5. **会话与状态**：维护 `history`、`tool_traces` 与 `state`（hint_level、question_category 等）。
 
 ---
 
@@ -100,39 +77,80 @@ RAG-Agent/
 - Evaluator：多模型候选答案 + 评审打分 + 答案集成
 
 ### 3.2 推荐技术路线（默认）
-- **LangGraph**：负责“可控流程编排（状态机、并发、分支、重试、持久化）”，适合 Tutor 与 Evaluator 的确定性链路。
-- **检索/索引实现**：可用 LlamaIndex（更偏“RAG 引擎与工具封装”）或 LangChain 的 Retriever 体系。  
-  - 推荐组合：**LangGraph（编排） + LlamaIndex（索引/QueryEngine 工具化）**，减少重复造轮子。
-
-> 若你希望“全栈统一”，也可以选择：LangChain/LangGraph 全套（Retriever + Tools + Graph）；或 LlamaIndex（Index + Agent）为主再少量流程化。当前文档以“LangGraph 编排”为默认。
+- **LLM 接入**：`langchain_deepseek.ChatDeepSeek` 统一封装，优先使用 DeepSeek（若 `DEEPSEEK_API_KEY` 存在），否则回退 OpenAI（`OPENAI_API_KEY`）。
+- **文本 RAG**：`Docx2txtLoader` 读取实验指导书 → `RecursiveCharacterTextSplitter` 分块 → `HuggingFaceEmbeddings`（默认 `BAAI/bge-m3`）→ `FAISS` 向量库 → MMR 检索。
+- **拓扑理解**：`python-docx` 提取 docx 图像 → OpenAI Responses API 结构化解析为 `TopologyExtraction` → `networkx` 构图 + FAISS 检索 → 返回拓扑上下文文本。
+- **服务与前端**：FastAPI 提供 `/api/chat`，Streamlit 提供对话 UI 与会话持久化。
 
 ---
 
 ## 4. 关键数据契约（AI/开发必须遵守）
 > 任何模块改动都不得破坏这些契约；如需变更，必须同步更新下游与测试样例。
 
-### 4.1 统一知识节点 Node（文本/图/拓扑）
-最小字段建议如下（JSON）：
+### 4.1 对话请求/响应与消息格式
+`/api/chat` 请求与响应结构（与 `server.py` 一致）：
+
+```json
+// ChatRequest
+{
+  "message": "用户问题",
+  "session_id": "可选",
+  "history": [{"role": "user|assistant|system", "content": "..."}],
+  "debug": false,
+  "max_turns": 5
+}
+```
+
+```json
+// ChatResponse
+{
+  "session_id": "s_xxx",
+  "reply": "模型回复",
+  "history": [{"role": "user|assistant|system", "content": "..."}],
+  "tool_traces": [{"tool": "检索|拓扑", "input": "...", "output": "..."}]
+}
+```
+
+### 4.2 工具调用与证据结构
+- 工具调用格式：`工具：检索：{query}` 或 `工具：拓扑：{query}`。
+- RAGAgent 返回：`{"answer": "...", "citations": [{"id": 1, "source": "xx.docx", "snippet": "..."}]}`。
+- 证据记录结构（用于教学链/调试）：
 
 ```json
 {
-  "node_id": "string",
-  "doc_id": "word_filename_or_lab_id",
-  "section_path": ["H1", "H2", "H3"],
-  "modality": "text | figure | topo | table",
-  "content_text": "clean text or caption/interpretation",
-  "assets": {
-    "image_path": "optional",
-    "figure_context": "optional text around the figure"
-  },
-  "topo_json": { "optional": "only for topo nodes" },
-  "metadata": {
-    "lab": "e.g., OSPF",
-    "topic": "e.g., neighbor",
-    "difficulty": "intro|mid|adv",
-    "tags": ["troubleshooting", "routing"]
-  }
+  "id": "E1",
+  "query": "检索问题",
+  "excerpt": "证据摘要",
+  "raw_text": "工具原始输出"
 }
+```
+
+### 4.3 拓扑结构化数据（TopologyExtraction）
+拓扑图结构化输出必须符合以下字段（与 `topo_rag.py` 一致）：
+
+```json
+{
+  "schema_version": 2,
+  "devices": [{"name": "R1", "type": "router|switch|host|firewall|server|unknown", "mgmt_ip": "可选"}],
+  "interfaces": [{
+    "device": "R1",
+    "name": "GE0/0/1",
+    "kind": "physical|svi|host_nic|unknown",
+    "mode": "access|trunk|unknown",
+    "allowed_vlans": "5-6",
+    "access_vlan": "5",
+    "ip": "可选",
+    "mask": "可选",
+    "vlan": "可选",
+    "ip_raw": "原始值（含不确定字符）",
+    "mask_raw": "原始值（含不确定字符）",
+    "vlan_raw": "原始值（含不确定字符）"
+  }],
+  "links": [{"a": {"device": "R1", "interface": "GE0/0/1"}, "b": {"device": "SW1", "interface": "GE0/0/2"}, "medium": "unknown"}],
+  "subnets": [{"cidr": "192.168.1.0/24", "members": [{"device": "R1", "interface": "GE0/0/1"}]}],
+  "warnings": ["解析不确定性说明"]
+}
+```
 
 ## 5.启动方法
 启动后端:

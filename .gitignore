@@ -64,3 +64,7 @@ Git忽略规则说明.md
 a.sh
 b.sh
 fix_model.py
+
+
+# 测试文件不提交
+agentic_rag/doc_test/
