@@ -158,6 +158,9 @@ uvicorn server:app --reload --port 8000
 启动前端:
 streamlit run app_streamlit.py
 
+一键同时启动（后端 + 前端）:
+bash scripts/start_all.sh
+
 ---
 
 ## 6. 本地嵌入模型（协作建议）

@@ -1,0 +1,72 @@
+
+[{
+    "id":,
+    "sub_id": "05_01",
+    "lab_manual": "实验5-端口镜像与链路层帧分析（2025版） ",
+    "question": "PCa和PCb为什么ping不通？",
+    "answer": "按实验5-1拓扑与步骤核对：PCa 接 SW1-01(E1/0/1)，PCb 接 SW1-02(E1/0/2)，两台 PC 子网掩码均为 255.255.255.0。 将 PCa 设置为 192.168.0.100/24、PCb 设置为 192.168.0.101/24，并在 PCa 执行 ping 192.168.0.101（目标应为 PCb 的 IP）。 若仍超时，排查 PCb 是否被 Windows 防火墙拦截 ICMP Echo：确保启用入站规则 “File and Printer Sharing (Echo Request - ICMPv4-In)”（该规则用于允许 ping）。",
+    "dialogueRound": 3,
+    "dialogue": [
+    {
+    "student": "PCa和PCb为什么ping不通？",
+    "teacher": "先别急着下结论，我们把范围缩小到“拓扑连线 + IP/掩码 + 目标地址”三件事：1）你现在 PCa、PCb 分别插在交换机的哪个口？实验5-1示例是 SW1-01 接 PCa、SW1-02 接 PCb。 2）两台 PC 的 IP 和子网掩码是否与拓扑标注一致（尤其是掩码是否都是 /24）？ 3）你在 PCa 上 ping 的“目标 IP”是多少？指导书步骤四里明确是 ping 对端 PCb 的 IP。 （可选）如果你已经在 PCb 开了 Ethereal，列表里能看到来自 PCa 的 ICMP request 吗？如果完全看不到，说明问题可能在更靠前的链路/地址层面。",
+    "hintlevel": "Level 1",
+    "category": "LAB_TROUBLESHOOTING",
+    "relevance": "YES",
+    "scope": "网络实验故障排查：Ping 不通/连通性测试 "
+    },
+    {
+    "student": "我确认了：PCa插SW1-01，PCb插SW1-02。PCa是192.168.0.100/255.255.255.0，PCb是192.168.0.10/255.255.255.0。我在PCa ping 192.168.0.101，一直超时。",
+    "teacher": "你这组信息里最“可疑”的点是：你 ping 的目标地址，和 PCb 机器上实际配置的地址不一致。对同一局域网内的通信，主机需要先把“目标协议地址”转换成“链路层可发送的目标地址”，也就是把协议地址映射到以太网地址（ARP 的核心目的就是做这个映射）。如果目标 IP 根本不在对端主机上，那么就不会出现正确的地址解析与回包，最终表现为 ping 超时。下一步你只需要做一件事：让“你 ping 的目标 IP”与“PCb 网卡上的 IP”严格一致，然后再测一次；同时保持两边掩码一致（/24）。",
+    "hintlevel": "Level 2",
+    "category": "LAB_TROUBLESHOOTING",
+    "relevance": "YES",
+    "scope": "同网段主机互通机理：ARP 地址解析 + ICMP 连通性 "
+    },
+    {
+    "student": "我把PCb改成192.168.0.101/255.255.255.0了，但PCa ping 192.168.0.101 还是 Request timed out。",
+    "teacher": "好，你已经把“目标地址不一致”这个大雷排掉了，下面直接按救援兜底流程把实验拉回正轨：\n1）按实验5-1要求重新核对连线：SW1-01↔PCa、SW1-02↔PCb（确保两端网口都是已启用、网线插紧、有链路灯）。\n2）按实验5-1的地址规划设置：PCa=192.168.0.100/24、PCb=192.168.0.101/24，然后在 PCa 执行 ping 192.168.0.101。\n3）如果此时依旧 timed out，优先检查 PCb 的 Windows 防火墙是否拦截 ICMP：启用入站规则 “File and Printer Sharing (Echo Request - ICMPv4-In)”（该规则用于允许 ping），或临时关闭防火墙验证一下。\n做到第 2 步后，理论上你在抓包里应能看到 PCa 的 request 与 PCb 的 reply（指导书总结里给了 request/reply 的源/目的 IP 方向）。",
+    "hintlevel": "Level 3",
+    "category": "LAB_TROUBLESHOOTING",
+    "relevance": "YES",
+    "scope": "实验5-1：PC 互连连通性恢复（物理连线 + IP/Mask + 防火墙 ICMP） "
+    }
+    ]
+},
+{
+    "id":,
+    "sub_id": "05_02",
+    "lab_manual": "实验5-端口镜像与链路层帧分析（2025版）",
+    "question": "PCa和PCb为什么ping不通？",
+    "answer": "按指导书先确认物理连线与地址规划无误：PCa↔SW1-01、PCb↔SW1-02，且两台PC子网掩码均为255.255.255.0；随后从PCa ping PCb 的IP（实验示例中应出现 PCa:192.168.0.100 → PCb:192.168.0.101 的 request/reply 对）。   若PCb抓包能看到Echo Request但没有Echo Reply，且关闭Windows防火墙后立刻能ping通，则根因通常是PCb端Windows Defender Firewall拦截ICMP回显；解决办法是在PCb启用入站规则“File and Printer Sharing (Echo Request - ICMPv4-In)”或新建一条允许ICMPv4 Echo Request的入站规则，然后保持防火墙开启再复测。",
+    "dialogueRound": 3,
+    "dialogue": [
+    {
+    "student": "PCa和PCb为什么ping不通？",
+    "teacher": "先按“缩小范围”的方式排查三个点：1）物理连线是否严格按实验拓扑示例接在SW1-01与SW1-02上（网线、网口灯、是否插错口）；2）两台PC的IP/子网掩码是否在同一网段，且掩码是否都为255.255.255.0；3）你在PCa上ping的目标IP是不是PCb网卡上真实配置的那个IP。",
+    "hintlevel": "Level 1",
+    "category": "LAB_TROUBLESHOOTING",
+    "relevance": "YES",
+    "scope": "网络实验故障排查：连通性测试（Ping不通）"
+    },
+    {
+    "student": "我确认了：PCa接SW1-01，PCb接SW1-02；两边掩码都是255.255.255.0；PCa是192.168.0.100，PCb是192.168.0.101。我从PCa ping 192.168.0.101 一直超时。PCb上抓包能看到ICMP Echo Request进来，但没有Echo Reply出去。",
+    "teacher": "你这个现象很关键：能在PCb抓到Echo Request，说明“PCa到PCb的到达路径+二层转发+IP地址方向”大概率没问题；但PCb不回Echo Reply，问题就更像发生在“主机端对ICMP的处理/过滤”上。最直接的验证法是：在PCb上临时关闭Windows Defender Firewall再ping一次（如果立刻通了，就可以把问题锁定为防火墙策略）；如果关闭后通，再把防火墙打开，转而去启用允许ICMP回显的入站规则，确保后续实验也不会因安全策略卡住。",
+    "hintlevel": "Level 2",
+    "category": "LAB_TROUBLESHOOTING",
+    "relevance": "YES",
+    "scope": "主机侧故障定位：抓包现象（有Request无Reply）→ 主机ICMP策略/防火墙"
+    },
+    {
+    "student": "我把PCb防火墙关掉就能ping通了，一打开又不通。",
+    "teacher": "好，根因已经锁定在PCb的Windows防火墙。按下面步骤把“允许ping”的入站规则打开（做完后保持防火墙开启）：（A）启用系统自带规则：1）在PCb按Win+R，输入wf.msc回车，打开“Windows Defender Firewall with Advanced Security”；2）左侧点“Inbound Rules/入站规则”；3）在列表里找到“File and Printer Sharing (Echo Request - ICMPv4-In)”（可能有多条不同Profile的同名规则），右键选择“Enable Rule/启用规则”；4）双击该规则，在“Advanced/高级”里确认它勾选了你当前网络的Profile（常见是Private；如果你机器网络被识别为Public，也要勾Public）；5）回到PCa再次ping 192.168.0.101，正常应恢复。（B）如果你找不到这条内置规则，直接新建一条ICMP入站规则：1）同样在wf.msc的“Inbound Rules”里，点右侧“Action → New Rule”；2）选“Custom”；3）选“All programs”；4）Protocol type选“ICMPv4”，点“Customize”，在ICMP类型里选择允许Echo Request；5）Action选“Allow the connection”；6）Profile按你当前网络勾选；7）命名后Finish。 这样做完，你在PCb抓包就应能看到Echo Reply返回，对应实验示例里的request/reply现象。",
+    "hintlevel": "Level 3",
+    "category": "LAB_TROUBLESHOOTING",
+    "relevance": "YES",
+    "scope": "Windows端实验环境修复：启用ICMP回显入站规则（允许Ping）"
+    }
+    ]
+    }
+    
+    
+]

@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
-from langchain_deepseek import ChatDeepSeek
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from agentic_rag.rag import RAGAgent  # 你项目里实际路径如不同请改
@@ -34,8 +33,8 @@ class PingSlotExtraction(BaseModel):
     ping_dst_result: Optional[str] = Field(default=None, description="Ping output to destination (truncate <=800 chars)")
 
 # [MOD] 新增：懒加载 LLM（避免 import 时初始化）
-_SLOT_LLM: Optional[ChatDeepSeek] = None
-def _get_slot_llm() -> ChatDeepSeek:
+_SLOT_LLM: Optional[Any] = None
+def _get_slot_llm() -> Any:
     global _SLOT_LLM
     if _SLOT_LLM is None:
         # _SLOT_LLM = ChatOpenAI(model="gpt-4o-mini", temperature=0)
