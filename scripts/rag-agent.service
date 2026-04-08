@@ -1,0 +1,42 @@
+# systemd 服务文件 — 部署到服务器后使用
+#
+# 安装步骤：
+#   1. 把项目部署到服务器，修改下方 WorkingDirectory / ExecStart / User 为实际路径和用户
+#   2. sudo cp scripts/rag-agent.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable rag-agent   # 开机自启
+#   5. sudo systemctl start rag-agent
+#
+# 常用命令：
+#   sudo systemctl status rag-agent      # 查看状态
+#   sudo systemctl restart rag-agent     # 重启
+#   journalctl -u rag-agent -f           # 实时查看日志
+
+[Unit]
+Description=RAG Agent (FastAPI + Streamlit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+# ↓ 修改为项目在服务器上的实际绝对路径
+WorkingDirectory=/home/ubuntu/RAG-Agent
+ExecStart=/bin/bash scripts/start_all.sh
+
+# 崩溃后 5 秒自动重启，最多连续失败 3 次
+Restart=on-failure
+RestartSec=5s
+StartLimitBurst=3
+StartLimitIntervalSec=60s
+
+# 环境变量（也可以写在 .env 文件里由 load_dotenv 读取）
+# Environment=DEEPSEEK_API_KEY=sk-xxx
+
+# 让日志通过 journald 收集
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rag-agent
+
+[Install]
+WantedBy=multi-user.target

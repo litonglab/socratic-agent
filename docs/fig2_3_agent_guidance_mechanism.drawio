@@ -1,0 +1,109 @@
+<mxfile host="app.diagrams.net" modified="2026-03-09T12:40:00.000Z" agent="GPT-5.4" version="24.7.17">
+  <diagram id="fig2-3-agent-guidance" name="图2-3 教学型Agent的决策与分层引导机制图">
+    <mxGraphModel dx="1600" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="950" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="2" value="图2-3 教学型 Agent 的决策与分层引导机制图" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=22;fontStyle=1;fontColor=#0F172A;" vertex="1" parent="1">
+          <mxGeometry x="445" y="18" width="810" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="3" value="通过问题理解、策略选择、工具调用与层级化教学支持，实现面向学习过程的智能交互" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=13;fontColor=#475569;" vertex="1" parent="1">
+          <mxGeometry x="340" y="56" width="1020" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="10" value="" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="70" y="145" width="1120" height="620" as="geometry"/>
+        </mxCell>
+        <mxCell id="11" value="" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#FFFBEB;strokeColor=#F59E0B;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="1240" y="145" width="320" height="620" as="geometry"/>
+        </mxCell>
+        <mxCell id="12" value="决策与交互主流程" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=17;fontStyle=1;fontColor=#334155;" vertex="1" parent="1">
+          <mxGeometry x="95" y="162" width="220" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="13" value="分层引导策略" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=17;fontStyle=1;fontColor=#B45309;" vertex="1" parent="1">
+          <mxGeometry x="1265" y="162" width="180" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="20" value="&lt;b&gt;提示工程与教学规则&lt;/b&gt;&lt;br&gt;角色约束 / 输出规范 / 安全边界" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#FFF7ED;strokeColor=#F97316;strokeWidth=2;fontSize=14;fontColor=#1F2937;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="430" y="210" width="400" height="78" as="geometry"/>
+        </mxCell>
+        <mxCell id="30" value="&lt;b&gt;学生问题&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#F8FAFC;strokeColor=#64748B;strokeWidth=1.8;fontSize=14;fontColor=#1F2937;" vertex="1" parent="1">
+          <mxGeometry x="120" y="430" width="155" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="31" value="&lt;b&gt;问题理解与分类&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:13px;&quot;&gt;识别问题意图与任务类型&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px;color:#475569;&quot;&gt;概念理解 / 配置审查 / 实验排障 / 计算分析&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#DBEAFE;strokeColor=#2563EB;strokeWidth=2;fontSize=14;fontColor=#1F2937;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="320" y="415" width="225" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="32" value="&lt;b&gt;Agent 决策与策略选择&lt;/b&gt;&lt;br&gt;决定是否检索、如何引导以及支持深度" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#FFF7ED;strokeColor=#F97316;strokeWidth=2;fontSize=14;fontColor=#1F2937;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="600" y="420" width="250" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="33" value="&lt;b&gt;工具调用与证据获取&lt;/b&gt;&lt;br&gt;按需调用检索与外部工具，形成问题依据" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#DCFCE7;strokeColor=#16A34A;strokeWidth=2;fontSize=14;fontColor=#1F2937;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="900" y="420" width="240" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="34" value="&lt;b&gt;教学回答生成&lt;/b&gt;&lt;br&gt;结合证据与当前引导层级生成回答" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#E0E7FF;strokeColor=#4F46E5;strokeWidth=2;fontSize=14;fontColor=#1F2937;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="910" y="585" width="220" height="88" as="geometry"/>
+        </mxCell>
+        <mxCell id="35" value="&lt;b&gt;学生反馈&lt;/b&gt;&lt;br&gt;根据学习表现动态调整后续支持" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#FEF3C7;strokeColor=#D97706;strokeWidth=2;fontSize=14;fontColor=#1F2937;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="585" y="590" width="280" height="82" as="geometry"/>
+        </mxCell>
+        <mxCell id="40" value="&lt;b&gt;按学生状态选择当前层级&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#FFF7ED;strokeColor=#F59E0B;strokeWidth=2;fontSize=14;fontColor=#7C2D12;" vertex="1" parent="1">
+          <mxGeometry x="1280" y="215" width="235" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="41" value="&lt;b&gt;Level 0&lt;/b&gt;&lt;br&gt;问题定位" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#FFFFFF;strokeColor=#F59E0B;strokeWidth=1.8;fontSize=14;fontColor=#1F2937;" vertex="1" parent="1">
+          <mxGeometry x="1310" y="315" width="180" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="42" value="&lt;b&gt;Level 1&lt;/b&gt;&lt;br&gt;原因解释" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#FFFFFF;strokeColor=#F59E0B;strokeWidth=1.8;fontSize=14;fontColor=#1F2937;" vertex="1" parent="1">
+          <mxGeometry x="1310" y="405" width="180" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="43" value="&lt;b&gt;Level 2&lt;/b&gt;&lt;br&gt;修复指导" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#FFFFFF;strokeColor=#F59E0B;strokeWidth=1.8;fontSize=14;fontColor=#1F2937;" vertex="1" parent="1">
+          <mxGeometry x="1310" y="495" width="180" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="44" value="&lt;b&gt;Level 3&lt;/b&gt;&lt;br&gt;完整答案" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;fillColor=#FFFFFF;strokeColor=#F59E0B;strokeWidth=1.8;fontSize=14;fontColor=#1F2937;" vertex="1" parent="1">
+          <mxGeometry x="1310" y="585" width="180" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="45" value="支持强度逐步增强" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;fontColor=#92400E;" vertex="1" parent="1">
+          <mxGeometry x="1295" y="680" width="220" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="50" value="注：该机制强调“先理解问题，再决定如何教”，并通过学生反馈持续调整后续支持方式，而非直接输出固定答案。" style="shape=note;whiteSpace=wrap;html=1;fillColor=#F8FAFC;strokeColor=#CBD5E1;fontSize=12;fontColor=#475569;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="360" y="805" width="940" height="58" as="geometry"/>
+        </mxCell>
+        <mxCell id="60" value="输入问题" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.8;strokeColor=#64748B;fontSize=12;" edge="1" parent="1" source="30" target="31">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="61" value="任务信息" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.8;strokeColor=#2563EB;fontSize=12;" edge="1" parent="1" source="31" target="32">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="62" value="行动路径" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.8;strokeColor=#F97316;fontSize=12;" edge="1" parent="1" source="32" target="33">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="63" value="证据支持" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.8;strokeColor=#16A34A;fontSize=12;" edge="1" parent="1" source="33" target="34">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="64" value="学生响应" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.8;strokeColor=#4F46E5;fontSize=12;" edge="1" parent="1" source="34" target="35">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="65" value="状态更新" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.8;strokeColor=#D97706;dashed=1;dashPattern=8 6;fontSize=12;" edge="1" parent="1" source="35" target="32">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="66" value="规则约束" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.8;strokeColor=#F97316;fontSize=12;" edge="1" parent="1" source="20" target="32">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="67" value="选择当前层级" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.8;strokeColor=#F59E0B;fontSize=12;" edge="1" parent="1" source="32" target="40">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="68" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#F59E0B;" edge="1" parent="1" source="40" target="41">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="69" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#F59E0B;" edge="1" parent="1" source="41" target="42">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="70" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#F59E0B;" edge="1" parent="1" source="42" target="43">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="71" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.6;strokeColor=#F59E0B;" edge="1" parent="1" source="43" target="44">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="72" value="决定回答深度" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=1.8;strokeColor=#F59E0B;fontSize=12;" edge="1" parent="1" source="40" target="34">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,182 @@
+[
+  {
+    "id": "TQ01",
+    "question": "在实验13中，包含 RT1/RT2/SW1~SW6/PCa~PCh 的拓扑图里，RT1 的 E0/0 接口连接到哪台设备的哪个接口？",
+    "reference": "RT1 的 E0/0 连接到 SW1 的 E1/0/1。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "easy",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ02",
+    "question": "在同一张实验13拓扑图中，RT2 的 E0/0 接口连接到哪台设备的哪个接口？",
+    "reference": "RT2 的 E0/0 连接到 SW4 的 E1/0/1。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "easy",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ03",
+    "question": "在该实验13拓扑图中，RT1 的 E1/0/1 接口与哪个交换机端口互联？",
+    "reference": "RT1 的 E1/0/1 连接到 SW1 的 E1/0/3。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "easy",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ04",
+    "question": "在该实验13拓扑图中，RT2 的 E1/0/1 接口与哪个交换机端口互联？",
+    "reference": "RT2 的 E1/0/1 连接到 SW4 的 E1/0/3。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "easy",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ05",
+    "question": "在该实验13拓扑图中，RT1 与 RT2 之间由哪些三层子网互联？各自对应哪对接口？",
+    "reference": "两台路由器通过 172.16.0.0/24 和 172.16.1.0/24 互联。172.16.0.0/24 对应 RT1.E0/0 与 RT2.E0/0，172.16.1.0/24 对应 RT1.E1/0/1 与 RT2.E1/0/1。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "medium",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ06",
+    "question": "在该实验13拓扑图中，PCa、PCb、PCc 分别通过 SW2 的哪些端口接入？",
+    "reference": "PCa 通过 SW2 的 E1/0/3 接入；PCb 和 PCc 都通过 SW2 的 E1/0/5 接入。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "medium",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ07",
+    "question": "在该实验13拓扑图中，SW3 的 E1/0/3 与哪些设备端口建立了链路？",
+    "reference": "SW3 的 E1/0/3 分别与 SW5 的 E1/0/1、SW6 的 E1/0/1 建立链路。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "medium",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ08",
+    "question": "在该实验13拓扑图中，PCh 是否是双归属主机？如果是，它连接到哪些交换机端口？",
+    "reference": "是。PCh 与 SW4 的 E1/0/1 相连，也与 SW5 的 E1/0/5 相连。",
+    "experiment_id": "lab13",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ09",
+    "question": "在该实验13拓扑图中，PCe、PCf、PCg 各自接在哪台交换机的哪个端口？",
+    "reference": "PCe 接 SW6.E1/0/5，PCf 接 SW5.E1/0/3，PCg 接 SW6.E1/0/3。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "medium",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ10",
+    "question": "在该实验13拓扑图中，路由器、交换机、主机各有多少台？",
+    "reference": "共有 2 台路由器（RT1、RT2）、6 台交换机（SW1~SW6）和 8 台主机（PCa~PCh）。",
+    "experiment_id": "lab13",
+    "type": "calculation",
+    "difficulty": "easy",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ11",
+    "question": "在该实验13拓扑图中，一共抽取出了多少条设备链路？",
+    "reference": "链路总数为 16 条。",
+    "experiment_id": "lab13",
+    "type": "calculation",
+    "difficulty": "easy",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ12",
+    "question": "在该实验13拓扑图中，172.16.0.0/24 子网包含哪些接口成员？",
+    "reference": "172.16.0.0/24 子网包含 RT1.E0/0 与 RT2.E0/0 两个成员接口。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "easy",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ13",
+    "question": "在该实验13拓扑图中，172.16.1.0/24 子网包含哪些接口成员？",
+    "reference": "172.16.1.0/24 子网包含 RT1.E1/0/1 与 RT2.E1/0/1 两个成员接口。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "easy",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ14",
+    "question": "在该实验13拓扑图中，若只按已抽取链路看，从 PCa 到 RT1 的最短设备路径是什么？",
+    "reference": "最短路径为 PCa -> SW2 -> SW1 -> RT1。",
+    "experiment_id": "lab13",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ15",
+    "question": "在该实验13拓扑图中，哪台交换机同时连接了 RT2 和终端主机？对应主机是谁？",
+    "reference": "SW4 同时连接了 RT2（E0/0 与 E1/0/1）和终端主机 PCh（经 SW4.E1/0/1）。",
+    "experiment_id": "lab13",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json"
+  },
+  {
+    "id": "TQ16",
+    "question": "在实验13另一张包含 RT1/SW1~SW3/PCa~PCd 的拓扑图中，SW1 的 E1/0/7 连接到了哪台设备的哪个接口？",
+    "reference": "SW1 的 E1/0/7 连接到 SW3 的 E1/0/1。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "easy",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_86c5bd4a21b89ec309a091fdb3f9640f012d078a.json"
+  },
+  {
+    "id": "TQ17",
+    "question": "在这张 RT1/SW1~SW3/PCa~PCd 的实验13拓扑图中，子网 172.16.2.0/24 的成员有哪些？",
+    "reference": "成员包括 RT1 的 E0/0、RT1 的 E0/1，以及 PCa、PCb、PCc、PCd。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "medium",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_86c5bd4a21b89ec309a091fdb3f9640f012d078a.json"
+  },
+  {
+    "id": "TQ18",
+    "question": "在这张 RT1/SW1~SW3/PCa~PCd 的实验13拓扑图中，PCd 接入的是 SW3 的哪个端口？",
+    "reference": "PCd 接入 SW3 的 E1/0/6。",
+    "experiment_id": "lab13",
+    "type": "concept",
+    "difficulty": "easy",
+    "requires_topology": true,
+    "source": "topo_store/lab13/approved_json/topo_86c5bd4a21b89ec309a091fdb3f9640f012d078a.json"
+  }
+]

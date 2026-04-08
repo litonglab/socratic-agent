@@ -1,183 +1,293 @@
-<!-- 文件：README.md -->
+# Networking Labs AI TA（RAG-Agent）
 
-# 拓扑图驱动多模态RAG + 苏格拉底教学Agent + 多模型评审集成（Networking Labs AI TA）
+这是一个面向计算机网络实验课的教学助手系统，核心做法是把课程文档检索、拓扑结构化理解、分层提示策略放在同一条 Agent 流程里，让回答尽量做到有依据、可追溯，也能在教学场景中逐步引导学生思考，而不是直接给最终答案。
 
-## 1. 项目背景（Why）
-本课题面向 AI 在计算机网络实验课中的三类突出问题：
+## 项目能力概览
 
-1) **证据找不准**：实验指导书/拓扑图/CLI 输出信息分散，传统 RAG 常出现召回不相关、跨模态信息对不齐的问题。  
-2) **直接给答案**：通用大模型倾向于“给最终配置/最终命令”，抑制学生思考，且在实验教学场景存在“越俎代庖”的教学风险。  
-3) **多模型答案难取舍**：不同大模型输出差异大，教师与学生难以判断可靠性与可追溯性。
+- 文本 RAG：从 `data/` 下的实验文档检索证据，并在回答中附引用。
+- 拓扑增强：将实验图转成结构化拓扑数据，运行时只读取审核通过的 `approved_json`。
+- 分层教学引导：按问题类型和对话状态动态调整 `hint_level` 与提示策略。
+- 多轮会话管理：支持注册登录、会话持久化、点赞点踩、用户水平记录。
+- 可选联网搜索：可在对话中启用网络搜索作为补充信息来源。
 
-本项目拟设计一套垂直 AI 助教系统：**拓扑图驱动多模态 RAG + 苏格拉底教学 Agent + 多模型答案评审集成**。前期问卷显示学生在实验原理理解、错误诊断与 AI 回答可靠性方面痛点明显，但对课程官方 AI 助手具有高使用意愿，为系统落地提供真实需求基础。
+## 核心流程（简版）
 
-系统目标：在统一上下文与教学意图下，只输出 **唯一、可追溯、有证据链** 的高质量答复，并支持多轮引导式排错与原理追问；最终与“直接调用通用大模型”基线对比，系统评估检索质量、任务完成度与教学有效性等指标。
+1. 用户提问进入 `agentic_rag/agent.py`。
+2. 系统做相关性判断、问题分类和提示层级决策。
+3. Agent 在循环中按需调用工具（检索 / 拓扑 / 搜索）。
+4. 汇总结果并补充引用，返回给前端与 API，同时异步持久化会话状态。
 
----
+## 快速开始
 
-## 2. 核心贡献（What）
-- **Topo-KG（拓扑知识图谱）**：统一表达实验指导书文本、网络拓扑图、CLI 命令与输出的结构化知识基座。
-- **Agentic RAG**：在 Topo-KG 基础上，构建多工具、多索引的 RAG Agent，自动生成面向故障排查的“错误诊断链（Diagnosis Chain）”。
-- **Socratic Tutor（苏格拉底教学智能体）**：将诊断链结构化为分层提问树，基于 LangGraph + 硬约束策略实现多轮引导式教学对话。
-- **Evaluator（多模型评审与集成）**：并行调用多种 LLM，在统一上下文与教学意图下进行 LLM-as-Judge 评审与集成，仅输出唯一且可追溯的答案。
+### 1) 环境准备
 
----
+- Python 3.10 及以上（建议 3.10/3.11）。
+- 建议在虚拟环境中运行。
 
-## 2.1 项目目录结构与模块职责
-
-```
-RAG-Agent/
-├── agentic_rag/              # 核心 Agent/RAG/Topo 模块
-│   ├── agent.py              # 入口：问题分类 + 提示策略 + 工具调用 + 对话状态
-│   ├── rag.py                # 文本 RAG：docx→分块→FAISS→MMR 检索 + 引用
-│   ├── topo_rag.py           # 拓扑图解析/索引/检索（含拓扑 JSON/Graph）
-│   ├── socratic/
-│   │   └── ping_controller.py # Ping 场景苏格拉底排错控制器
-│   ├── llm_config.py         # DeepSeek/OpenAI Chat LLM 构建
-│   ├── embedding.py          # 简易向量化脚本（FAISS）
-│   ├── utils.py              # RAG 输出清洗与证据摘要
-│   └── __init__.py
-├── server.py                 # FastAPI 后端 API（/api/chat）
-├── app_streamlit.py          # Streamlit 前端
-├── data/                     # 原始实验指导书（.docx）
-├── faiss_index/              # 文本向量索引（FAISS）
-├── topo_store_lab1/          # 拓扑索引与解析结果（示例）
-├── topo_store_lab13/         # 默认拓扑索引与解析结果
-├── scripts/
-│   └── download_bge_m3.py     # 本地嵌入模型下载脚本
-├── generate_qa_dataset.py    # QA 数据集生成脚本（路径参数当前写死）
-├── sessions.json             # Streamlit 会话持久化（可选）
-├── evaluator/                # 预留评审模块（当前为空）
-└── socratic_tutor/            # 预留 Tutor 模块（当前为空）
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt
 ```
 
-### `agentic_rag/agent.py` 职责概述
-`agentic_rag/agent.py` 是当前系统的核心入口与调度器，负责：
-1. **相关性守卫**：判断问题是否与网络课程相关，不相关则拒答。
-2. **问题分类与提示策略**：将问题分为 LAB/THEORY/REVIEW/CALC，动态选择系统提示词与 Hint Level。
-3. **工具调用**：按“工具：检索/拓扑：query”规范调用 `RAGAgent` 与 `TopoRetriever`。
-4. **苏格拉底引导**：对 Ping 场景切换到 `socratic/ping_controller.py` 的槽位式排错流程。
-5. **会话与状态**：维护 `history`、`tool_traces` 与 `state`（hint_level、question_category 等）。
+如果你需要在 Streamlit 聊天中上传图片并做 OCR，建议额外安装：
 
----
+```bash
+pip install rapidocr-onnxruntime
+```
 
-## 3. 总体架构（How）
-### 3.1 模块分层
-1) **数据与知识层**
-- Word 实验指导书（含拓扑图/示意图）
-- 图像理解产物（caption、结构化拓扑 Topo-JSON）
-- Topo-KG（图数据库或轻量图结构）
+### 2) 配置环境变量
 
-2) **检索与推理层**
-- 多模态索引：文本向量检索 / 图示检索（caption 或图向量）/ 拓扑图查询（Topo-KG）
-- Agentic RAG：工具化检索引擎 + 诊断链生成
+复制模板并填写密钥：
 
-3) **教学与评审层**
-- Socratic Tutor：对话状态机 + 提示阶梯 + 学生模型
-- Evaluator：多模型候选答案 + 评审打分 + 答案集成
+```bash
+cp .env.example .env
+```
 
-### 3.2 推荐技术路线（默认）
-- **LLM 接入**：`langchain_deepseek.ChatDeepSeek` 统一封装，优先使用 DeepSeek（若 `DEEPSEEK_API_KEY` 存在），否则回退 OpenAI（`OPENAI_API_KEY`）。
-- **文本 RAG**：`Docx2txtLoader` 读取实验指导书 → `RecursiveCharacterTextSplitter` 分块 → `HuggingFaceEmbeddings`（默认 `BAAI/bge-m3`）→ `FAISS` 向量库 → MMR 检索。
-- **拓扑理解**：`python-docx` 提取 docx 图像 → OpenAI Responses API 结构化解析为 `TopologyExtraction` → `networkx` 构图 + FAISS 检索 → 返回拓扑上下文文本。
-- **服务与前端**：FastAPI 提供 `/api/chat`，Streamlit 提供对话 UI 与会话持久化。
+最少需要配置：
 
----
+- `DEEPSEEK_API_KEY`：聊天主模型必填。
+- `OPENAI_API_KEY`：仅在构建拓扑结构化数据或运行评测脚本时需要。
 
-## 4. 关键数据契约（AI/开发必须遵守）
-> 任何模块改动都不得破坏这些契约；如需变更，必须同步更新下游与测试样例。
+常用变量如下：
 
-### 4.1 对话请求/响应与消息格式
-`/api/chat` 请求与响应结构（与 `server.py` 一致）：
+| 变量名 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DEEPSEEK_API_KEY` | 无 | 聊天模型鉴权，必填 |
+| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | DeepSeek 接口地址 |
+| `DEEPSEEK_CHAT_MODEL` | `deepseek-chat` | 聊天模型名 |
+| `EMBEDDING_MODEL_NAME` | `BAAI/bge-m3` | 文本向量模型 |
+| `RERANKER_MODEL_NAME` | `BAAI/bge-reranker-v2-m3` | 重排模型 |
+| `DISABLE_RERANKER` | `0` | 为 `1` 时关闭重排，走纯混合召回 |
+| `RAG_INDEX_DIR` | 自动优先 `faiss_index/enriched` | 指定向量索引目录 |
+| `RAG_REBUILD_INDEX` | `0` | 为 `1` 时按 `data/*.docx` 重建索引 |
+| `TOPO_STORE_ROOT` | `topo_store` | 拓扑结构化数据根目录 |
+| `TOPO_DEFAULT_EXPERIMENT_ID` | 空 | 问题未带实验号时的默认实验 |
+| `MAX_CHAT_CONCURRENCY` | `50` | 聊天并发上限 |
+| `CORS_ALLOWED_ORIGINS` | `*` | FastAPI 跨域白名单 |
+| `PERSIST_PATH` | `sessions.json` | Streamlit 本地会话落盘路径 |
+| `HF_ENDPOINT` | 空 | HuggingFace 镜像地址（网络不稳定时可配） |
+
+说明：`.env.example` 里的 `BACKEND_BASE_URL` 当前版本未被核心代码使用，可保留不动。
+
+### 3) 准备课程文档与索引
+
+- 把实验指导书（`.docx`）放到 `data/`。
+- 默认会优先读取已有索引，不强制重建。
+- 如果希望从文档重新切分并生成索引，可临时开启：
+
+```bash
+export RAG_REBUILD_INDEX=1
+```
+
+### 4) 启动服务
+
+开发模式（推荐）：
+
+```bash
+bash scripts/start_dev.sh
+```
+
+- 启动 `uvicorn --reload` 与 Streamlit。
+- 默认开启 `RAG_DEV_FAST_START=1`，后端会先可访问，再后台预热 RAG。
+
+稳定模式（演示或部署前自测）：
+
+```bash
+bash scripts/start_all.sh
+```
+
+- 启动后端并等待健康检查通过，再拉起 Streamlit。
+- 默认后端端口 `8000`，Streamlit 端口 `8501`。
+
+也可分开启动：
+
+```bash
+uvicorn server:app --reload --port 8000
+streamlit run app_streamlit.py
+```
+
+## API 速查
+
+`server.py` 提供以下接口：
+
+- 无鉴权：`GET /health`、`GET /health/ready`、`POST /api/register`、`POST /api/login`
+- 需鉴权（Bearer Token）：`/api/me`、`/api/chat`、`/api/chat/stream`、`/api/feedback`、`/api/sessions*`
+
+### 鉴权流程
+
+1. `POST /api/register`（或 `POST /api/login`）获取 `token`。
+2. 调用受保护接口时带上请求头：
+   `Authorization: Bearer <token>`
+
+### ChatRequest / ChatResponse
+
+请求体（`POST /api/chat`）：
 
 ```json
-// ChatRequest
 {
   "message": "用户问题",
-  "session_id": "可选",
+  "session_id": "可选，留空会自动创建",
   "history": [{"role": "user|assistant|system", "content": "..."}],
   "debug": false,
-  "max_turns": 5
+  "max_turns": 5,
+  "enable_websearch": true
 }
 ```
 
+响应体：
+
 ```json
-// ChatResponse
 {
   "session_id": "s_xxx",
-  "reply": "模型回复",
+  "message_id": "m_xxx",
+  "reply": "可见回答",
+  "thinking": "隐藏思考内容（可为空）",
   "history": [{"role": "user|assistant|system", "content": "..."}],
-  "tool_traces": [{"tool": "检索|拓扑", "input": "...", "output": "..."}]
+  "tool_traces": [{"tool": "检索|拓扑|搜索", "input": "...", "output": "..."}]
 }
 ```
 
-### 4.2 工具调用与证据结构
-- 工具调用格式：`工具：检索：{query}` 或 `工具：拓扑：{query}`。
-- RAGAgent 返回：`{"answer": "...", "citations": [{"id": 1, "source": "xx.docx", "snippet": "..."}]}`。
-- 证据记录结构（用于教学链/调试）：
+### 流式接口
 
-```json
-{
-  "id": "E1",
-  "query": "检索问题",
-  "excerpt": "证据摘要",
-  "raw_text": "工具原始输出"
-}
-```
+`POST /api/chat/stream` 使用 SSE，事件类型包括：
 
-### 4.3 拓扑结构化数据（TopologyExtraction）
-拓扑图结构化输出必须符合以下字段（与 `topo_rag.py` 一致）：
+- `meta`：会话与消息元信息
+- `delta`：增量 token
+- `done`：完整结束包
+- `error`：异常信息
 
-```json
-{
-  "schema_version": 2,
-  "devices": [{"name": "R1", "type": "router|switch|host|firewall|server|unknown", "mgmt_ip": "可选"}],
-  "interfaces": [{
-    "device": "R1",
-    "name": "GE0/0/1",
-    "kind": "physical|svi|host_nic|unknown",
-    "mode": "access|trunk|unknown",
-    "allowed_vlans": "5-6",
-    "access_vlan": "5",
-    "ip": "可选",
-    "mask": "可选",
-    "vlan": "可选",
-    "ip_raw": "原始值（含不确定字符）",
-    "mask_raw": "原始值（含不确定字符）",
-    "vlan_raw": "原始值（含不确定字符）"
-  }],
-  "links": [{"a": {"device": "R1", "interface": "GE0/0/1"}, "b": {"device": "SW1", "interface": "GE0/0/2"}, "medium": "unknown"}],
-  "subnets": [{"cidr": "192.168.1.0/24", "members": [{"device": "R1", "interface": "GE0/0/1"}]}],
-  "warnings": ["解析不确定性说明"]
-}
-```
+## 拓扑结构化数据构建
 
-## 5.启动方法
-启动后端:
-uvicorn server:app --reload --port 8000
-启动前端:
-streamlit run app_streamlit.py
+当你需要把实验文档中的拓扑图转成结构化 JSON，可执行：
 
-一键同时启动（后端 + 前端）:
-bash scripts/start_all.sh
-
----
-
-## 6. 本地嵌入模型（协作建议）
-为了避免将 2GB+ 模型推到 GitHub，推荐使用脚本下载到本地并通过环境变量指向。
-
-### 6.1 启动前设置路径
 ```bash
-export EMBEDDING_MODEL_NAME=./models/bge-m3
+python scripts/build_topology_store.py \
+  --docx "data/实验13：子网划分（详细版）.docx" \
+  --overwrite
 ```
 
-### 6.2 网络不稳定时设置镜像，则不需开VPN（可选，推荐设置）
-```bash
-export HF_ENDPOINT=https://hf-mirror.com
+处理流程是：抽图 -> 前置分类（topology/non_topology/unclear）-> 抽取 -> 审核 -> 发布。  
+运行时仅读取：
+
+```text
+topo_store/<experiment_id>/approved_json/
 ```
 
-### 6.3 一键下载（推荐）
-```bash
-python scripts/download_bge_m3.py
+建议目录形态：
+
+```text
+topo_store/
+└── lab13/
+    ├── images/
+    ├── classifications/
+    ├── raw_json/
+    ├── reviews/
+    ├── approved_json/
+    └── manifest.json
 ```
-默认下载到 `models/bge-m3/`（已在 `.gitignore` 中忽略）。
+
+## 构建拓扑增强评测集
+
+如果你希望在评测里更充分体现 Topology RAG 的能力，可以用题库脚本生成“拓扑题占比更高”的数据集：
+
+```bash
+python eval/build_balanced_qa_dataset.py \
+  --topo-ratio 0.4 \
+  --target-size 93 \
+  --output eval/qa_dataset_topo_balanced.json
+```
+
+脚本会合并 `eval/topology_question_bank.json` 并自动打上 `requires_topology` 字段，随后你可以在评测脚本里显式指定数据集路径，例如：
+
+```bash
+python eval/ablation_study.py --dataset eval/qa_dataset_topo_balanced.json
+python eval/performance_benchmark.py --dataset eval/qa_dataset_topo_balanced.json
+python eval/judge_consistency.py --dataset eval/qa_dataset_topo_balanced.json
+python eval/topology_evaluation.py --questions-file eval/topology_question_bank.json
+```
+
+## 目录结构（核心部分）
+
+```text
+RAG-Agent/
+├── agentic_rag/
+│   ├── agent.py
+│   ├── rag.py
+│   ├── topo_rag.py
+│   ├── topo_models.py
+│   ├── llm_config.py
+│   ├── vision.py
+│   └── web_search.py
+├── components/                # Streamlit 自定义输入组件
+├── storage/                   # 用户、会话、反馈、画像等存储逻辑
+├── scripts/                   # 启动与部署脚本
+├── eval/                      # 评测与对比实验脚本
+├── data/                      # 课程 docx 原始数据
+├── faiss_index/               # 向量索引
+├── topo_store/                # 拓扑结构化产物
+├── data_store/                # SQLite 数据文件
+├── server.py                  # FastAPI API
+└── app_streamlit.py           # Streamlit UI
+```
+
+## 论文对齐与实验结论（V4）
+
+本仓库与论文稿的系统设计基本对齐，核心对应关系可以概括为：检索层做细粒度优化，教学层做分层苏格拉底引导，系统层以 FastAPI + Streamlit 形成可运行原型。
+
+### 研究问题
+
+- 问题一：在计算机网络实验教学场景中，如何缓解通用 LLM 在课程专有知识上的证据偏差与召回失配，使回答具备可追溯的证据链。
+- 问题二：在教学交互中，如何避免“直接给答案”的单轮问答模式，转向可分层推进的苏格拉底式引导，并根据学生状态动态调节提示强度。
+- 问题三：如何将检索优化与教学策略整合为可运行、可评估的原型系统，并通过实验验证其在教学场景中的有效性与适用性。
+
+### 研究方案
+
+- 方案一（检索层）：基于“问题类型 + 提示层级”做细粒度检索优化，组合 `BM25 + Dense + RRF + CrossEncoderReranker`，并引入拓扑结构化上下文增强实验问答。
+- 方案二（教学层）：构建多场景、多层级苏格拉底提示策略，将实验问题分类后执行分层引导，`hint_level` 按 `MAINTAIN / INCREASE / JUMP_TO_MAX` 动态更新。
+- 方案三（系统层）：实现个性化教学 Agent 原型，集成 `FastAPI + Streamlit + SSE`、会话状态、反馈与水平估计模块，并通过对比、消融和案例分析进行验证。
+
+### 设计对齐摘要
+
+- 检索层：按问题类别与 `hint_level` 调整检索参数，组合 `BM25 + Dense + RRF + CrossEncoderReranker`。
+- 教学层：采用多场景分层提示策略，`hint_level` 按 `MAINTAIN / INCREASE / JUMP_TO_MAX` 动态更新。
+- 系统层：支持 `SSE` 流式输出、会话状态管理、反馈闭环与水平估计。
+
+### 论文中的实验配置（摘录）
+
+- 文本抽取结果显示，实验样本规模为 93 条，分组为 30/30/29。
+- 检索综合评分采用：
+  `Sret = 0.2R + 0.3F + 0.3C + 0.2T`
+- 消融实验评分采用：
+  `Sabl = 0.15R + 0.20F + 0.15C + 0.15T + 0.20G + 0.15P`
+- 统计检验包含 `Wilcoxon` 与 `Cliff's delta`。
+
+
+## 常见问题
+
+### 1) 启动后首轮响应较慢
+
+这通常是模型和索引在冷启动，属于正常现象。开发模式下会后台预热，第一轮后会明显变快。
+
+### 2) `/api/chat` 返回 401
+
+`/api/chat` 是鉴权接口，先调用登录/注册拿到 token，再在请求头带 `Authorization: Bearer <token>`。
+
+### 3) 提示缺少 OCR 依赖
+
+安装 `rapidocr-onnxruntime`，该依赖在上传图片并执行 OCR 时会被调用。
+
+### 4) 拓扑问答提示“未识别到实验编号”
+
+在问题里明确写“实验13”或“lab13”，或者配置 `TOPO_DEFAULT_EXPERIMENT_ID`。
+
+### 5) 需要只看 API，不跑前端
+
+直接运行：
+
+```bash
+uvicorn server:app --port 8000
+```
+
+随后用 Postman 或 `curl` 调 `/api/*` 即可。

@@ -1,0 +1,653 @@
+[
+  {
+    "question": "如何正确制作一根T568B标准的直通网线？请列出主要步骤。",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验1-网线配线架与机柜（2025版）.docx",
+    "id": 1
+  },
+  {
+    "question": "在网线制作过程中，使用网线测试仪检测网线连接的正确性时，直通线的指示灯顺序应该是怎样的？如果发现部分指示灯不亮，可能是什么原因？",
+    "type": "troubleshooting",
+    "difficulty": "easy",
+    "source": "实验1-网线配线架与机柜（2025版）.docx",
+    "id": 2
+  },
+  {
+    "question": "为什么在连接网络设备时，使用交叉线连接两台交换机，而不是使用直通线？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验1-网线配线架与机柜（2025版）.docx",
+    "id": 3
+  },
+  {
+    "question": "在同一交换机上配置两台PC机的IP地址时为什么不能使用相同的IP地址？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验1-网线配线架与机柜（2025版）.docx",
+    "id": 4
+  },
+  {
+    "question": "如果配置了正确的IP地址和子网掩码，但两台PC机之间仍无法ping通，可能是什么原因？如何解决？",
+    "type": "troubleshooting",
+    "difficulty": "hard",
+    "source": "实验1-网线配线架与机柜（2025版）.docx",
+    "id": 5
+  },
+  {
+    "question": "配置Windows 10以允许ICMP请求的具体步骤是什么？",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验1-网线配线架与机柜（2025版）.docx",
+    "id": 6
+  },
+  {
+    "question": "网线测试仪在检测网线时，如果连接线序没有问题，是否意味着网线一定可用？为什么？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验1-网线配线架与机柜（2025版）.docx",
+    "id": 7
+  },
+  {
+    "question": "在实验中，如果将连接两台交换机的交叉线换为直通线，网络连接会出现什么问题？请解释原因。",
+    "type": "troubleshooting",
+    "difficulty": "hard",
+    "source": "实验1-网线配线架与机柜（2025版）.docx",
+    "id": 8
+  },
+  {
+    "question": "在跨机柜跳接中，若机柜6和机柜7之间需要连接PC1和PC3，PC2和PC4，请描述详细的连接步骤。",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验1-网线配线架与机柜（2025版）.docx",
+    "id": 9
+  },
+  {
+    "question": "在使用 ping 命令测试连通性时，如何查看命令的详细用法？",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验1-网线配线架与机柜（2025版）.docx",
+    "id": 10
+  },
+  {
+    "question": "如果两台 PC 机无法互通，可能的原因有哪些？请列出至少两种可能的故障原因。",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验1-网线配线架与机柜（2025版）.docx",
+    "id": 11
+  },
+  {
+    "question": "在实验中，如何使用配线架将两组机柜中的所有 PC 连接成一个局域网？请描述主要步骤。",
+    "type": "config",
+    "difficulty": "hard",
+    "source": "实验1-网线配线架与机柜（2025版）.docx",
+    "id": 12
+  },
+  {
+    "question": "在进行同一网段的ARP协议分析时，为什么需要清空两台PC机的ARP缓存？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验11-网络层协议分析（2025版）.docx",
+    "id": 13
+  },
+  {
+    "question": "假设在不同网段的ARP协议分析中，配置交换机VLAN时忘记设置VLAN接口的IP地址，会导致什么问题？",
+    "type": "troubleshooting",
+    "difficulty": "hard",
+    "source": "实验11-网络层协议分析（2025版）.docx",
+    "id": 14
+  },
+  {
+    "question": "请列出设置交换机VLAN 2并设置其端口和IP地址的完整步骤。",
+    "type": "config",
+    "difficulty": "easy",
+    "source": "实验11-网络层协议分析（2025版）.docx",
+    "id": 15
+  },
+  {
+    "question": "如何在交换机的VLAN接口上配置IP地址？请列出具体步骤。",
+    "type": "config",
+    "difficulty": "easy",
+    "source": "实验11-网络层协议分析（2025版）.docx",
+    "id": 16
+  },
+  {
+    "question": "使用命令\"tracert -d 192.168.3.100\"时，如果目标主机不存在，ICMP报文中会出现什么类型的消息？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验11-网络层协议分析（2025版）.docx",
+    "id": 17
+  },
+  {
+    "question": "在PC上如何查看和清空ARP缓存？请列出相应的命令。",
+    "type": "troubleshooting",
+    "difficulty": "easy",
+    "source": "实验11-网络层协议分析（2025版）.docx",
+    "id": 18
+  },
+  {
+    "question": "静态路由协议与动态路由协议在网络互通中有何不同？请详细说明。",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验12-静态路由协议（2025版）.docx",
+    "id": 19
+  },
+  {
+    "question": "如果PCa无法与PCb互通，列出可能导致这个问题的排查步骤。",
+    "type": "troubleshooting",
+    "difficulty": "hard",
+    "source": "实验12-静态路由协议（2025版）.docx",
+    "id": 20
+  },
+  {
+    "question": "在配置RT1的过程中，如何设置通向PCb网段的静态路由？请给出完整的配置命令。",
+    "type": "config",
+    "difficulty": "easy",
+    "source": "实验12-静态路由协议（2025版）.docx",
+    "id": 21
+  },
+  {
+    "question": "在静态路由配置中，如何查看路由器的路由表以确认配置是否成功？",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验12-静态路由协议（2025版）.docx",
+    "id": 22
+  },
+  {
+    "question": "如果PCa和PCb之间无法ping通，可能的故障原因有哪些？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验12-静态路由协议（2025版）.docx",
+    "id": 23
+  },
+  {
+    "question": "在使用三层交换机实现VLAN间路由时，如何配置交换机的端口加入不同的VLAN？",
+    "type": "config",
+    "difficulty": "hard",
+    "source": "实验12-静态路由协议（2025版）.docx",
+    "id": 24
+  },
+  {
+    "question": "在配置VLAN间路由时，使用三层交换机而不使用路由器的方式是哪个？请描述此配置的基本步骤。",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验12-静态路由协议（2025版）.docx",
+    "id": 25
+  },
+  {
+    "question": "在方式a中，两台PC无法互相ping通。你已经确认相同VLAN内的PC可以互相ping通。那么应该如何进一步排查和解决问题？",
+    "type": "troubleshooting",
+    "difficulty": "hard",
+    "source": "实验12-静态路由协议（2025版）.docx",
+    "id": 26
+  },
+  {
+    "question": "如果在方式b1中，去除方式a的连线后，不同VLAN的PC能否通过直接连接的网线互相ping通？请解释原因。",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验12-静态路由协议（2025版）.docx",
+    "id": 27
+  },
+  {
+    "question": "如何为一个已存在的 VLAN 端口配置 IP 地址？",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验12-静态路由协议（2025版）.docx",
+    "id": 28
+  },
+  {
+    "question": "如果一个 VLAN 中的所有以太网端口都处于 down 状态，该 VLAN 端口的状态将会如何变化？",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验12-静态路由协议（2025版）.docx",
+    "id": 29
+  },
+  {
+    "question": "在未对 VLAN 端口进行任何描述配置的情况下，该 VLAN 端口的默认描述字符串是什么？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验12-静态路由协议（2025版）.docx",
+    "id": 30
+  },
+  {
+    "question": "什么是子网掩码，在子网划分中起到什么作用？",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 31
+  },
+  {
+    "question": "在实验中配置PCa的IP地址为192.168.124.10，默认网关为192.168.124.1。如果PCa不能ping通其他PC，可能的原因是什么？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 32
+  },
+  {
+    "question": "请列出配置SW1的E1/0/1端口为trunk口的步骤和命令。",
+    "type": "config",
+    "difficulty": "hard",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 33
+  },
+  {
+    "question": "在配置三层交换机时，如何为VLAN接口分配IP地址？以VLAN接口2为例。",
+    "type": "config",
+    "difficulty": "easy",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 34
+  },
+  {
+    "question": "如果在配置VLAN接口时发现无法与其他设备通信，可能存在哪些配置问题？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 35
+  },
+  {
+    "question": "给定一个IP地址192.168.120.1/22，计算该子网的可用主机数量。",
+    "type": "calculation",
+    "difficulty": "hard",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 36
+  },
+  {
+    "question": "在实验13中，如何为SW2配置VLAN 2并将端口Ethernet 1/0/3和Ethernet 1/0/4加入该VLAN？",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 37
+  },
+  {
+    "question": "如果在配置过程中发现某条线路没有联通，文档建议通过什么方法进行故障排查？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 38
+  },
+  {
+    "question": "在实验13中的路由器配置中，GigabitEthernet 0/1接口的子网掩码是多少？",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 39
+  },
+  {
+    "question": "在 SW1 上，VLAN 2 的子网掩码是多少？",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 40
+  },
+  {
+    "question": "如果在 SW4 上 Ethernet 1/0/3 接口无法通过 VLAN 通信，可能的原因是什么？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 41
+  },
+  {
+    "question": "在 SW4 上配置 VLAN 6 的 IP 地址时，使用的子网掩码位是多少？",
+    "type": "calculation",
+    "difficulty": "medium",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 42
+  },
+  {
+    "question": "子网掩码如何帮助区分网络号和主机号？请简述其工作原理。",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 43
+  },
+  {
+    "question": "如果一个网络需要划分为 8 个子网，那么应选择什么样的子网掩码？",
+    "type": "calculation",
+    "difficulty": "hard",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 44
+  },
+  {
+    "question": "在配置网络时，为什么不推荐使用非连续的子网掩码，例如 255.255.255.64？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验13-子网划分（2025版）.docx",
+    "id": 45
+  },
+  {
+    "question": "如何使用直通网线直接连接两台PC，并进行基本的网络设置以实现文件共享？",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验2-PC互连与对等网络 (2025版).docx",
+    "id": 46
+  },
+  {
+    "question": "如果两台PC无法通过ping命令互相通信，可能存在哪些问题？请列出可能的原因并给出解决方案。",
+    "type": "troubleshooting",
+    "difficulty": "hard",
+    "source": "实验2-PC互连与对等网络 (2025版).docx",
+    "id": 47
+  },
+  {
+    "question": "在配置文件共享时，如何设置文件夹权限以确保特定用户只能读取文件，而其他用户可以读取和写入文件？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验2-PC互连与对等网络 (2025版).docx",
+    "id": 48
+  },
+  {
+    "question": "在实验中，如何验证 PCb 对 PCa 的文件夹的完全和只读权限？",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验2-PC互连与对等网络 (2025版).docx",
+    "id": 49
+  },
+  {
+    "question": "如果在设置 PCa 的以太网共享时，系统未自动设置 LAN 适配器的 IP 地址为 192.168.137.1，该如何手动修复这个问题？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验2-PC互连与对等网络 (2025版).docx",
+    "id": 50
+  },
+  {
+    "question": "在实验中，PCb 需要将其 IP 地址设置为多少以确保正确连接？",
+    "type": "config",
+    "difficulty": "easy",
+    "source": "实验2-PC互连与对等网络 (2025版).docx",
+    "id": 51
+  },
+  {
+    "question": "什么是 DNS 服务器，它在网络连接中起到什么作用？",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验2-PC互连与对等网络 (2025版).docx",
+    "id": 52
+  },
+  {
+    "question": "如果 PCb 无法访问互联网，可能存在哪些配置错误？请列出并解释可能的原因。",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验2-PC互连与对等网络 (2025版).docx",
+    "id": 53
+  },
+  {
+    "question": "请描述在实验中如何为 PCb 配置网络参数，包括 IP 地址、子网掩码、默认网关和 DNS 服务器。",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验2-PC互连与对等网络 (2025版).docx",
+    "id": 54
+  },
+  {
+    "question": "如何通过Console口连接PC机与三层交换机？",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 55
+  },
+  {
+    "question": "在配置交换机的Telnet连接时，设置authentication-mode的命令是什么？",
+    "type": "config",
+    "difficulty": "easy",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 56
+  },
+  {
+    "question": "完成交换机Telnet配置后，如何启用Telnet服务？",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 57
+  },
+  {
+    "question": "在配置H3C交换机时，如何设置VTY用户的认证模式和密码？",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 58
+  },
+  {
+    "question": "当通过Telnet连接到交换机时，为什么要求计算机的IP地址与设备接口的IP地址在同一网段？",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 59
+  },
+  {
+    "question": "如果在配置交换机时遇到'fan warning'提示，该如何处理？",
+    "type": "troubleshooting",
+    "difficulty": "easy",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 60
+  },
+  {
+    "question": "在通过 Console 口连接 PC 和路由器时，需要使用什么类型的电缆进行连接？",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 61
+  },
+  {
+    "question": "如果配置路由器的以太网接口 IP 地址时出现 'This subnet overlaps with another interface' 错误，该如何解决？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 62
+  },
+  {
+    "question": "在通过 Telnet 配置路由器时，如何设置 vty 0 4 端口的认证模式和密码？",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 63
+  },
+  {
+    "question": "在进行设备配置时，如何通过命令行更改设备的名字为H3C？",
+    "type": "config",
+    "difficulty": "easy",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 64
+  },
+  {
+    "question": "什么是进入系统视图的命令？进入系统视图后如何返回用户视图？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 65
+  },
+  {
+    "question": "如果通过浏览器不能登录设备控制台，可能是什么原因？如何解决这一问题？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 66
+  },
+  {
+    "question": "在系统视图下，如何切换到以太网接口视图？",
+    "type": "config",
+    "difficulty": "easy",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 67
+  },
+  {
+    "question": "在命令行中，如何查看所有以'd'开头的命令？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 68
+  },
+  {
+    "question": "如果在命令行中输入'display h?'，将会列出哪些关键字？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验3-网络设备基本配置（2025版）.docx",
+    "id": 69
+  },
+  {
+    "question": "在实验中，为什么建议尽量不要使用交换机的1、2接口？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验5-端口镜像与链路层帧分析（2025版）.docx",
+    "id": 70
+  },
+  {
+    "question": "在PCb上使用抓包软件Ethereal进行数据包截取分析时，为什么在打开Ethereal之前必须安装wincap？",
+    "type": "troubleshooting",
+    "difficulty": "easy",
+    "source": "实验5-端口镜像与链路层帧分析（2025版）.docx",
+    "id": 71
+  },
+  {
+    "question": "如何配置PCa和PCb的IP地址和子网掩码，以便能够在实验拓扑中正常通信？",
+    "type": "config",
+    "difficulty": "hard",
+    "source": "实验5-端口镜像与链路层帧分析（2025版）.docx",
+    "id": 72
+  },
+  {
+    "question": "在使用 Ethereal 软件截取网络报文时，链路层帧的组成部分包括哪些？",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验5-端口镜像与链路层帧分析（2025版）.docx",
+    "id": 73
+  },
+  {
+    "question": "PCb 在使用 Ethereal 截取数据包时，无法显示所有包的内容，这是什么原因？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验5-端口镜像与链路层帧分析（2025版）.docx",
+    "id": 74
+  },
+  {
+    "question": "在交换机上进行端口镜像配置时，如何连接 PCa、PCb 和 PCc 的接口？",
+    "type": "config",
+    "difficulty": "hard",
+    "source": "实验5-端口镜像与链路层帧分析（2025版）.docx",
+    "id": 75
+  },
+  {
+    "question": "在进行端口镜像配置时，为什么需要将PCa与PCc之间的信息交换通过PCb截取？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验5-端口镜像与链路层帧分析（2025版）.docx",
+    "id": 76
+  },
+  {
+    "question": "如果在执行配置命令时出现错误提示，建议的解决步骤是什么？",
+    "type": "troubleshooting",
+    "difficulty": "easy",
+    "source": "实验5-端口镜像与链路层帧分析（2025版）.docx",
+    "id": 77
+  },
+  {
+    "question": "请描述如何在H3C设备上配置端口镜像的具体步骤，包括所需的命令。",
+    "type": "config",
+    "difficulty": "hard",
+    "source": "实验5-端口镜像与链路层帧分析（2025版）.docx",
+    "id": 78
+  },
+  {
+    "question": "什么是端口镜像技术，其主要应用场景是什么？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验5-端口镜像与链路层帧分析（2025版）.docx",
+    "id": 79
+  },
+  {
+    "question": "如果在配置端口镜像后，PCb未能捕获到PCa与PCc之间的信息交换，可能存在哪些故障原因？",
+    "type": "troubleshooting",
+    "difficulty": "hard",
+    "source": "实验5-端口镜像与链路层帧分析（2025版）.docx",
+    "id": 80
+  },
+  {
+    "question": "请描述如何使用命令行查看已连接交换机的版本信息。",
+    "type": "config",
+    "difficulty": "easy",
+    "source": "实验5-端口镜像与链路层帧分析（2025版）.docx",
+    "id": 81
+  },
+  {
+    "question": "在 VLAN 技术中，相同 VLAN 内的设备间是否可以互相访问？",
+    "type": "concept",
+    "difficulty": "easy",
+    "source": "实验8-虚拟局域网技术（2025版）.docx",
+    "id": 82
+  },
+  {
+    "question": "在实验中，如果某 PC 无法 ping 通同 VLAN 内的其他 PC，应该尝试进行哪种故障排查步骤？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验8-虚拟局域网技术（2025版）.docx",
+    "id": 83
+  },
+  {
+    "question": "请详细描述如何在交换机上为端口1到4配置 VLAN 2。",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验8-虚拟局域网技术（2025版）.docx",
+    "id": 84
+  },
+  {
+    "question": "什么是Trunk链路，它在交换机级联中有什么作用？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验8-虚拟局域网技术（2025版）.docx",
+    "id": 85
+  },
+  {
+    "question": "在交换机SW3上，如何配置以太网端口1/0/1为Trunk模式并允许VLAN 2和VLAN 3通过？",
+    "type": "config",
+    "difficulty": "hard",
+    "source": "实验8-虚拟局域网技术（2025版）.docx",
+    "id": 86
+  },
+  {
+    "question": "在实验中，如果发现两台PC不能互相ping通，可能存在哪些故障原因？请列出至少两种可能的原因。",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验8-虚拟局域网技术（2025版）.docx",
+    "id": 87
+  },
+  {
+    "question": "在 VLAN 实验中，为什么需要将交换机端口配置为 trunk 模式？",
+    "type": "concept",
+    "difficulty": "medium",
+    "source": "实验8-虚拟局域网技术（2025版）.docx",
+    "id": 88
+  },
+  {
+    "question": "如果两台 PC 无法互相 ping 通，可能的故障原因有哪些？",
+    "type": "troubleshooting",
+    "difficulty": "easy",
+    "source": "实验8-虚拟局域网技术（2025版）.docx",
+    "id": 89
+  },
+  {
+    "question": "在配置 VLAN 时，如何将 SW4 的端口 Ethernet 1/0/3 和 Ethernet 1/0/4 加入 VLAN 2？",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验8-虚拟局域网技术（2025版）.docx",
+    "id": 90
+  },
+  {
+    "question": "在配置交换机的端口时，如何将一个端口设置为支持所有VLAN的Trunk链路类型？",
+    "type": "config",
+    "difficulty": "medium",
+    "source": "实验8-虚拟局域网技术（2025版）.docx",
+    "id": 91
+  },
+  {
+    "question": "如果PCa无法ping通PCb，可能的原因有哪些？",
+    "type": "troubleshooting",
+    "difficulty": "medium",
+    "source": "实验8-虚拟局域网技术（2025版）.docx",
+    "id": 92
+  },
+  {
+    "question": "假设一个VLAN的IP地址为192.168.2.1，子网掩码为255.255.255.0，那么PC的IP地址为192.168.2.100时，应该配置的默认网关是什么？",
+    "type": "calculation",
+    "difficulty": "easy",
+    "source": "实验8-虚拟局域网技术（2025版）.docx",
+    "id": 93
+  }
+]

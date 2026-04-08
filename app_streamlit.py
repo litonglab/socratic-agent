@@ -1,8 +1,11 @@
 # app_streamlit.py
+import base64
 import json
 import uuid
 import os
 import time
+import inspect
+from datetime import datetime
 import streamlit as st
 from typing import Dict, Any, Optional, Iterable, Tuple, List
 from dotenv import load_dotenv
@@ -12,11 +15,17 @@ load_dotenv()
 # ✅ 直接本地调用 server.py（不走 HTTP）
 from server import (
     chat_once,
+    chat_once_stream,
+    submit_feedback,
     register_user,
     login_user,
+    load_user_session_cache,
     RegisterRequest,
     LoginRequest,
 )
+from agentic_rag.chat_format import split_assistant_content
+from agentic_rag.vision import describe_image
+from components.chat_input_images import chat_input_images
 
 PERSIST_PATH = os.getenv("PERSIST_PATH", os.path.join(os.path.dirname(__file__), "sessions.json"))
   # 会话持久化文件路径（可改）
@@ -30,6 +39,10 @@ PSEUDO_STREAM_CHUNK = int(os.getenv("PSEUDO_STREAM_CHUNK", "20"))
 # -----------------------------
 def _new_local_session_id() -> str:
     return f"local_{uuid.uuid4().hex[:8]}"
+
+
+def _now_ts() -> float:
+    return time.time()
 
 
 def _default_title_from_message(text: str, max_len: int = 12) -> str:
@@ -50,7 +63,13 @@ def _load_persisted() -> Dict[str, Any]:
 
 
 def _save_persisted():
-    data = st.session_state.persisted_data
+    import copy
+    data = copy.deepcopy(st.session_state.persisted_data)
+    # 剥离 image_b64 避免 JSON 文件膨胀
+    for _uname, udata in data.get("users", {}).items():
+        for _sid, sess in udata.get("sessions", {}).items():
+            for m in sess.get("messages", []):
+                m.pop("image_b64", None)
     try:
         with open(PERSIST_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -84,18 +103,107 @@ def _save_user_store(username: str, sessions: Dict[str, Any], active_session_id:
 
 def _normalize_sessions(sessions: Dict[str, Any]) -> Dict[str, Any]:
     normalized = {}
-    for sid, sess in (sessions or {}).items():
+    for idx, (sid, sess) in enumerate((sessions or {}).items(), start=1):
         if not isinstance(sess, dict):
             continue
         if "archived" not in sess:
             sess["archived"] = False
+        if "updated_at" not in sess:
+            sess["updated_at"] = float(idx)
         normalized[sid] = sess
     return normalized
 
 
+def _session_updated_at(sess: Dict[str, Any], fallback: float = 0.0) -> float:
+    raw = sess.get("updated_at", fallback)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        try:
+            return datetime.fromisoformat(str(raw)).timestamp()
+        except (TypeError, ValueError):
+            return fallback
+
+
+def _session_title_from_messages(messages: List[Dict[str, Any]], fallback: str = "新会话") -> str:
+    for message in messages or []:
+        if message.get("role") == "user":
+            title = _default_title_from_message(message.get("content", ""))
+            if title:
+                return title
+    return fallback
+
+
+def _merge_backend_sessions(
+    local_sessions: Dict[str, Any],
+    backend_sessions: Dict[str, Any],
+) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for sid, remote in (backend_sessions or {}).items():
+        local = local_sessions.get(sid, {})
+        remote_messages = remote.get("messages", []) or []
+        local_messages = local.get("messages", []) or []
+        use_remote_messages = len(remote_messages) > len(local_messages)
+        chosen_messages = remote_messages if use_remote_messages else local_messages
+        merged[sid] = {
+            "title": local.get("title") or _session_title_from_messages(chosen_messages, sid),
+            "messages": chosen_messages,
+            "archived": local.get("archived", False),
+            "updated_at": max(
+                _session_updated_at(local),
+                _session_updated_at(remote),
+            ),
+        }
+    for sid, local in local_sessions.items():
+        if sid not in merged:
+            merged[sid] = local
+    return _normalize_sessions(merged)
+
+
+def _sorted_session_items(
+    sessions: Dict[str, Any],
+    *,
+    archived: Optional[bool] = None,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    items: List[Tuple[str, Dict[str, Any], float]] = []
+    for idx, (sid, sess) in enumerate((sessions or {}).items(), start=1):
+        if archived is not None and bool(sess.get("archived")) != archived:
+            continue
+        fallback = float(idx)
+        items.append((sid, sess, _session_updated_at(sess, fallback)))
+    items.sort(key=lambda item: item[2], reverse=True)
+    return [(sid, sess) for sid, sess, _ in items]
+
+
+def _pick_session_id(*, archived: Optional[bool] = None) -> Optional[str]:
+    items = _sorted_session_items(st.session_state.sessions, archived=archived)
+    if items:
+        return items[0][0]
+    if archived is not None:
+        any_items = _sorted_session_items(st.session_state.sessions, archived=None)
+        if any_items:
+            return any_items[0][0]
+    return None
+
+
+def _touch_session(session_id: str) -> None:
+    sess = st.session_state.sessions.get(session_id)
+    if not sess:
+        return
+    sess["updated_at"] = _now_ts()
+    st.session_state.sessions[session_id] = sess
+
+
 def _load_user_sessions(username: str) -> None:
     store = _get_user_store(username)
-    st.session_state.sessions = _normalize_sessions(store.get("sessions", {}))
+    local_sessions = _normalize_sessions(store.get("sessions", {}))
+    backend_sessions: Dict[str, Any] = {}
+    if st.session_state.get("auth_token"):
+        try:
+            backend_sessions = load_user_session_cache(token=st.session_state.auth_token).get("sessions", {})
+        except Exception:
+            backend_sessions = {}
+    st.session_state.sessions = _merge_backend_sessions(local_sessions, backend_sessions)
     st.session_state.active_session_id = store.get("active_session_id")
     _ensure_one_session()
     _save_persisted()
@@ -114,8 +222,15 @@ def _persist_current_user_sessions() -> None:
 def _ensure_one_session():
     if not st.session_state.sessions:
         sid = _new_local_session_id()
-        st.session_state.sessions[sid] = {"title": "新会话", "messages": [], "archived": False}
+        st.session_state.sessions[sid] = {
+            "title": "新会话",
+            "messages": [],
+            "archived": False,
+            "updated_at": _now_ts(),
+        }
         st.session_state.active_session_id = sid
+    elif not st.session_state.active_session_id or st.session_state.active_session_id not in st.session_state.sessions:
+        st.session_state.active_session_id = _pick_session_id(archived=False)
 
 
 def _switch_session(session_id: str):
@@ -125,7 +240,12 @@ def _switch_session(session_id: str):
 
 def _create_new_session():
     sid = _new_local_session_id()
-    st.session_state.sessions[sid] = {"title": "新会话", "messages": [], "archived": False}
+    st.session_state.sessions[sid] = {
+        "title": "新会话",
+        "messages": [],
+        "archived": False,
+        "updated_at": _now_ts(),
+    }
     st.session_state.active_session_id = sid
     _persist_current_user_sessions()
 
@@ -141,12 +261,12 @@ def _set_session_archived(session_id: str, archived: bool) -> None:
     if not sess:
         return
     sess["archived"] = archived
+    sess["updated_at"] = _now_ts()
     st.session_state.sessions[session_id] = sess
     if archived and st.session_state.active_session_id == session_id:
-        for sid, s in st.session_state.sessions.items():
-            if not s.get("archived"):
-                st.session_state.active_session_id = sid
-                break
+        next_sid = _pick_session_id(archived=False)
+        if next_sid:
+            st.session_state.active_session_id = next_sid
         else:
             _create_new_session()
     _persist_current_user_sessions()
@@ -166,7 +286,7 @@ def _delete_session(session_id: str):
         del st.session_state.sessions[session_id]
 
     if st.session_state.active_session_id == session_id:
-        st.session_state.active_session_id = None
+        st.session_state.active_session_id = _pick_session_id(archived=False)
 
     _ensure_one_session()
     _persist_current_user_sessions()
@@ -187,11 +307,48 @@ def _iter_chunks(text: str, chunk_size: int) -> Iterable[str]:
         yield text[i:i + chunk_size]
 
 
+def _assistant_visible_content(message: Dict[str, Any]) -> str:
+    if message.get("role") != "assistant":
+        return message.get("content", "")
+    if "thinking" in message:
+        return message.get("content", "")
+    parsed = split_assistant_content(message.get("content", ""))
+    if parsed["has_thinking"]:
+        return parsed["visible"]
+    return message.get("content", "")
+
+
+def _message_for_history(message: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    role = message.get("role")
+    if role not in {"user", "assistant", "system"}:
+        return None
+    if role == "assistant":
+        return {"role": role, "content": _assistant_visible_content(message)}
+    return {"role": role, "content": message.get("content", "")}
+
+
+def _render_assistant_content(content: str, thinking: Optional[str] = None) -> None:
+    parsed = split_assistant_content(content)
+    visible = content if thinking is not None else (parsed["visible"] if parsed["has_thinking"] else content)
+    hidden = thinking if thinking is not None else parsed["thinking"]
+    has_hidden = bool(hidden) or (thinking is None and parsed["has_thinking"])
+
+    if has_hidden:
+        with st.expander("Thinking", expanded=False):
+            if hidden:
+                st.markdown(hidden)
+            else:
+                st.caption("思考过程已隐藏")
+
+    if (visible or "").strip():
+        st.markdown(visible)
+
+
 # -----------------------------
 # Streamlit state init (with persistence)
 # -----------------------------
-st.set_page_config(page_title="计算机网络实验课 AI 助教", layout="wide")
-st.markdown("<h1 style='text-align:center;'>Networking Lab Agent</h1>", unsafe_allow_html=True)
+st.set_page_config(page_title="人大计算机网络实验课 AI 助教", layout="wide")
+st.markdown("<h1 style='text-align:center;'>NetRUC Agent</h1>", unsafe_allow_html=True)
 
 if "persisted_data" not in st.session_state:
     st.session_state.persisted_data = _ensure_persisted_shape()
@@ -208,6 +365,9 @@ if "sync_history" not in st.session_state:
 if "debug" not in st.session_state:
     st.session_state.debug = False
 
+if "enable_websearch" not in st.session_state:
+    st.session_state.enable_websearch = True
+
 if "sessions" not in st.session_state or "active_session_id" not in st.session_state:
     st.session_state.sessions = {}
     st.session_state.active_session_id = None
@@ -215,7 +375,7 @@ if "sessions" not in st.session_state or "active_session_id" not in st.session_s
 # 确保 active_session_id 合法
 if st.session_state.current_user:
     if st.session_state.active_session_id not in st.session_state.sessions:
-        st.session_state.active_session_id = next(iter(st.session_state.sessions.keys()), None)
+        st.session_state.active_session_id = _pick_session_id(archived=False)
         _ensure_one_session()
         _persist_current_user_sessions()
 
@@ -309,6 +469,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.session_state.debug = st.toggle("Debug（显示工具调用）", value=st.session_state.debug)
+    st.session_state.enable_websearch = st.toggle("启用联网搜索", value=st.session_state.enable_websearch)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -330,11 +491,11 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 会话列表")
 
-    unarchived_sessions = {sid: s for sid, s in st.session_state.sessions.items() if not s.get("archived")}
-    archived_sessions = {sid: s for sid, s in st.session_state.sessions.items() if s.get("archived")}
+    unarchived_sessions = _sorted_session_items(st.session_state.sessions, archived=False)
+    archived_sessions = _sorted_session_items(st.session_state.sessions, archived=True)
 
     if st.session_state.manage_mode and unarchived_sessions:
-        options = [f"{s.get('title', sid)} ({sid})" for sid, s in unarchived_sessions.items()]
+        options = [f"{s.get('title', sid)} ({sid})" for sid, s in unarchived_sessions]
         selected = st.multiselect("选择要操作的会话", options)
         selected_ids = [opt.split("(")[-1].rstrip(")") for opt in selected]
         col_a, col_b = st.columns(2)
@@ -349,7 +510,7 @@ with st.sidebar:
                     _delete_session(sid)
                 st.rerun()
 
-    for sid, sess in unarchived_sessions.items():
+    for sid, sess in unarchived_sessions:
         title = sess.get("title", sid)
         is_active = (sid == st.session_state.active_session_id)
         label = f"▶ {title}" if is_active else title
@@ -369,7 +530,7 @@ with st.sidebar:
 
     with st.expander("已归档"):
         if st.session_state.manage_mode and archived_sessions:
-            options = [f"{s.get('title', sid)} ({sid})" for sid, s in archived_sessions.items()]
+            options = [f"{s.get('title', sid)} ({sid})" for sid, s in archived_sessions]
             selected = st.multiselect("选择要恢复/删除的会话", options, key="archived_select")
             selected_ids = [opt.split("(")[-1].rstrip(")") for opt in selected]
             col_a, col_b = st.columns(2)
@@ -384,7 +545,7 @@ with st.sidebar:
                         _delete_session(sid)
                     st.rerun()
 
-        for sid, sess in archived_sessions.items():
+        for sid, sess in archived_sessions:
             title = sess.get("title", sid)
             col1, col2, col3 = st.columns([0.7, 0.15, 0.15])
             with col1:
@@ -410,13 +571,89 @@ active_messages = active_session.get("messages", [])
 
 st.caption(f"当前会话：{active_session.get('title', active_id)}")
 
-for m in active_messages:
+for idx, m in enumerate(active_messages):
     role = m.get("role", "assistant")
     content = m.get("content", "")
+    thinking = m.get("thinking")
     tool_traces = m.get("tool_traces", None)
+    message_id = m.get("message_id")
+    current_feedback = m.get("feedback")
 
     with st.chat_message("user" if role == "user" else "assistant"):
-        st.markdown(content)
+        # 显示用户消息中附带的图片
+        if role == "user" and m.get("image_b64"):
+            for img_data in m["image_b64"]:
+                st.image(base64.b64decode(img_data), width=300)
+        if role == "assistant":
+            _render_assistant_content(content, thinking=thinking)
+        else:
+            st.markdown(content)
+
+        if role == "assistant" and message_id and active_id:
+            supports_icon = "icon" in inspect.signature(st.button).parameters
+            col_like, col_dislike, _ = st.columns([1, 1, 12], gap="small")
+            with col_like:
+                like_clicked = False
+                if supports_icon:
+                    like_clicked = st.button(
+                        " ",
+                        key=f"fb_like_{active_id}_{message_id}_{idx}",
+                        icon=":material/thumb_up:" if current_feedback == "like" else ":material/thumb_up_off_alt:",
+                        type="primary" if current_feedback == "like" else "tertiary",
+                    )
+                else:
+                    like_label = "👍🏻" if current_feedback == "like" else "👍︎"
+                    like_clicked = st.button(
+                        like_label,
+                        key=f"fb_like_{active_id}_{message_id}_{idx}",
+                        type="primary" if current_feedback == "like" else "tertiary",
+                    )
+
+                if like_clicked:
+                    next_feedback = "cancel" if current_feedback == "like" else "like"
+                    try:
+                        submit_feedback(
+                            token=st.session_state.auth_token or "",
+                            session_id=active_id,
+                            message_id=message_id,
+                            feedback=next_feedback,
+                        )
+                        m["feedback"] = None if next_feedback == "cancel" else "like"
+                        _persist_current_user_sessions()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"反馈提交失败：{repr(e)}")
+            with col_dislike:
+                dislike_clicked = False
+                if supports_icon:
+                    dislike_clicked = st.button(
+                        " ",
+                        key=f"fb_dislike_{active_id}_{message_id}_{idx}",
+                        icon=":material/thumb_down:" if current_feedback == "dislike" else ":material/thumb_down_off_alt:",
+                        type="primary" if current_feedback == "dislike" else "tertiary",
+                    )
+                else:
+                    dislike_label = "👎🏻" if current_feedback == "dislike" else "👎︎"
+                    dislike_clicked = st.button(
+                        dislike_label,
+                        key=f"fb_dislike_{active_id}_{message_id}_{idx}",
+                        type="primary" if current_feedback == "dislike" else "tertiary",
+                    )
+
+                if dislike_clicked:
+                    next_feedback = "cancel" if current_feedback == "dislike" else "dislike"
+                    try:
+                        submit_feedback(
+                            token=st.session_state.auth_token or "",
+                            session_id=active_id,
+                            message_id=message_id,
+                            feedback=next_feedback,
+                        )
+                        m["feedback"] = None if next_feedback == "cancel" else "dislike"
+                        _persist_current_user_sessions()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"反馈提交失败：{repr(e)}")
 
         if st.session_state.debug and role == "assistant" and tool_traces:
             with st.expander("工具调用详情", expanded=False):
@@ -428,10 +665,51 @@ for m in active_messages:
 
 
 # -----------------------------
-# Input + send (local chat_once)
+# Input + send (custom chat input with paste/upload/thumbnails)
 # -----------------------------
-user_input = st.chat_input("输入你的问题，例如：我对子网划分感到困惑")
-if user_input:
+
+# 渲染自定义输入组件到底部固定栏（类似 ChatGPT）
+_input_v = st.session_state.get("_input_v", 0)
+with st._bottom:
+    raw_input = chat_input_images(key=f"chat_img_input_{_input_v}")
+
+if raw_input:
+    # 解析组件返回的 JSON: {text: "...", images: [{base64, mime}, ...]}
+    input_data = json.loads(raw_input)
+    user_text = (input_data.get("text") or "").strip()
+    input_images = input_data.get("images") or []
+
+    # OCR 提取图片文字
+    image_descriptions: List[str] = []
+    image_b64_list: List[str] = []
+
+    if input_images:
+        with st.spinner("正在识别图片内容…"):
+            for i, img_info in enumerate(input_images):
+                try:
+                    img_bytes = base64.b64decode(img_info["base64"])
+                    image_b64_list.append(img_info["base64"])
+                    desc = describe_image(img_bytes, filename=f"image_{i}.png")
+                    image_descriptions.append(f"[图片 {i+1}]: {desc}")
+                except Exception as e:
+                    image_descriptions.append(f"[图片 {i+1}]: (识别失败: {repr(e)})")
+
+    # 拼接最终消息
+    if image_descriptions:
+        desc_block = "\n".join(image_descriptions)
+        if user_text:
+            combined_message = f"以下是用户上传的图片内容：\n{desc_block}\n\n用户的问题：{user_text}"
+        else:
+            combined_message = f"以下是用户上传的图片内容：\n{desc_block}\n\n请根据图片内容回答。"
+    else:
+        combined_message = user_text
+
+    if not combined_message.strip():
+        st.stop()
+
+    # 重置输入组件（清除已提交的图片和文字）
+    st.session_state["_input_v"] = _input_v + 1
+
     if not st.session_state.active_session_id:
         _create_new_session()
         active_id = st.session_state.active_session_id
@@ -440,54 +718,86 @@ if user_input:
     sess = st.session_state.sessions[active_id]
 
     if sess.get("title") in (None, "", "新会话"):
-        sess["title"] = _default_title_from_message(user_input)
+        sess["title"] = _default_title_from_message(user_text or "图片问题")
 
-    sess["messages"].append({"role": "user", "content": user_input})
+    user_msg_record = {"role": "user", "content": combined_message}
+    if image_b64_list:
+        user_msg_record["image_b64"] = image_b64_list
+    sess["messages"].append(user_msg_record)
+    _touch_session(active_id)
     _persist_current_user_sessions()
 
     with st.chat_message("user"):
-        st.markdown(user_input)
+        if image_b64_list:
+            for img_data in image_b64_list:
+                st.image(base64.b64decode(img_data), width=300)
+        st.markdown(user_text or "(仅上传了图片)")
 
     payload_session_id = None if active_id.startswith("local_") else active_id
 
     history_payload = None
     if st.session_state.sync_history:
-        history_payload = [{"role": m.get("role"), "content": m.get("content", "")} for m in sess.get("messages", [])]
+        previous_messages = sess.get("messages", [])[:-1]
+        history_payload = [
+            normalized
+            for normalized in (_message_for_history(message) for message in previous_messages)
+            if normalized is not None
+        ]
 
     try:
         with st.chat_message("assistant"):
-            thinking = st.empty()
-            thinking.markdown("思考中…")
+            placeholder = st.empty()
+            placeholder.markdown("思考中…")
 
             data = None
             assistant_text = ""
+            assistant_thinking = ""
             tool_traces = []
+            response_message_id = None
 
-            # ✅ 本地调用（不走 HTTP）
-            with st.spinner("正在生成回复..."):
-                data = chat_once(
-                    token=st.session_state.auth_token or "",
-                    message=user_input,
-                    session_id=payload_session_id,
-                    history=history_payload,
-                    debug=st.session_state.debug,
-                    max_turns=5,
-                )
+            buf = ""
+            stream_kwargs = {
+                "token": st.session_state.auth_token or "",
+                "message": combined_message,
+                "session_id": payload_session_id,
+                "history": history_payload,
+                "debug": st.session_state.debug,
+                "max_turns": 5,
+            }
+            try:
+                supports_websearch_toggle = "enable_websearch" in inspect.signature(chat_once_stream).parameters
+            except (TypeError, ValueError):
+                supports_websearch_toggle = False
+            if supports_websearch_toggle:
+                stream_kwargs["enable_websearch"] = st.session_state.enable_websearch
 
-            assistant_text = (data or {}).get("reply", "") or ""
-            tool_traces = (data or {}).get("tool_traces", []) or []
-
-            thinking.empty()
-
-            if USE_PSEUDO_STREAMING and assistant_text:
-                placeholder = st.empty()
-                buf = ""
-                for chunk in _iter_chunks(assistant_text, PSEUDO_STREAM_CHUNK):
-                    buf += chunk
-                    placeholder.markdown(buf)
-                    time.sleep(PSEUDO_STREAM_DELAY)
-            else:
-                st.markdown(assistant_text)
+            for event in chat_once_stream(**stream_kwargs):
+                if event["type"] == "meta":
+                    response_message_id = event.get("message_id")
+                    placeholder.markdown("正在检索与生成…")
+                elif event["type"] == "token":
+                    buf += event["content"]
+                    parsed_stream = split_assistant_content(buf)
+                    if parsed_stream["visible"]:
+                        placeholder.markdown(parsed_stream["visible"])
+                    elif parsed_stream["has_thinking"] or parsed_stream["in_thinking"]:
+                        placeholder.markdown("思考中…")
+                    else:
+                        placeholder.markdown(buf)
+                elif event["type"] == "done":
+                    data = event
+                    tool_traces = event.get("tool_traces", []) or []
+                    final_reply = event.get("reply", "")
+                    assistant_thinking = event.get("thinking", "") or ""
+                    if not final_reply and buf:
+                        parsed_final = split_assistant_content(buf)
+                        final_reply = parsed_final["visible"]
+                        assistant_thinking = assistant_thinking or parsed_final["thinking"]
+                    if final_reply:
+                        placeholder.markdown(final_reply)
+                    elif assistant_thinking:
+                        placeholder.empty()
+                    assistant_text = final_reply or ""
 
     except Exception as e:
         err_text = f"生成失败：{repr(e)}"
@@ -510,13 +820,17 @@ if user_input:
     sess["messages"].append({
         "role": "assistant",
         "content": assistant_text,
-        "tool_traces": tool_traces
+        "thinking": assistant_thinking,
+        "tool_traces": tool_traces,
+        "message_id": response_message_id,
+        "feedback": None,
     })
+    _touch_session(active_id)
     _persist_current_user_sessions()
 
     # 额外展示（避免上面的 streaming placeholder 被 rerun 覆盖）
     with st.chat_message("assistant"):
-        st.markdown(assistant_text)
+        _render_assistant_content(assistant_text, thinking=assistant_thinking)
         if st.session_state.debug and tool_traces:
             with st.expander("工具调用详情", expanded=False):
                 for t in tool_traces:

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { margin: 0; padding: 0; font-family: "Source Sans Pro", sans-serif; }
+  #paste-zone {
+    border: 2px dashed #ccc;
+    border-radius: 8px;
+    padding: 10px 16px;
+    text-align: center;
+    cursor: pointer;
+    color: #888;
+    font-size: 14px;
+    min-height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    transition: border-color 0.2s, background-color 0.2s;
+    outline: none;
+  }
+  #paste-zone:focus, #paste-zone:hover {
+    border-color: #ff4b4b;
+    background-color: #fff5f5;
+  }
+  #paste-zone.has-image {
+    border-color: #4caf50;
+    background-color: #f0fff0;
+    justify-content: flex-start;
+  }
+  #preview {
+    max-width: 180px;
+    max-height: 90px;
+    border-radius: 4px;
+    display: none;
+  }
+  #clear-btn {
+    background: #ff4b4b;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    display: none;
+  }
+  #clear-btn:hover { background: #e03e3e; }
+</style>
+</head>
+<body>
+<div id="paste-zone" tabindex="0">
+  <span id="hint">点击此处，然后粘贴截图 (Ctrl+V / Cmd+V)</span>
+  <img id="preview" />
+  <button id="clear-btn">清除</button>
+</div>
+<script>
+  var zone = document.getElementById('paste-zone');
+  var hint = document.getElementById('hint');
+  var preview = document.getElementById('preview');
+  var clearBtn = document.getElementById('clear-btn');
+
+  function sendMsg(type, data) {
+    var msg = Object.assign({isStreamlitMessage: true, type: type}, data || {});
+    console.log('[PasteComponent] sending:', type, data);
+    window.parent.postMessage(msg, "*");
+  }
+
+  // Handle Streamlit render events
+  window.addEventListener("message", function(event) {
+    if (event.data && event.data.type === "streamlit:render") {
+      console.log('[PasteComponent] received render event');
+      sendMsg("streamlit:setFrameHeight", {height: document.body.scrollHeight});
+    }
+  });
+
+  // Paste handler
+  zone.addEventListener('paste', function(e) {
+    console.log('[PasteComponent] paste event detected');
+    var items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image/') === 0) {
+        e.preventDefault();
+        var file = items[i].getAsFile();
+        var reader = new FileReader();
+        reader.onload = function(event) {
+          var dataUrl = event.target.result;
+          preview.src = dataUrl;
+          preview.style.display = 'inline';
+          hint.textContent = '已粘贴';
+          clearBtn.style.display = 'inline';
+          zone.classList.add('has-image');
+          sendMsg("streamlit:setFrameHeight", {height: document.body.scrollHeight});
+          var b64 = dataUrl.split(',')[1];
+          var mime = dataUrl.split(';')[0].split(':')[1];
+          var val = JSON.stringify({base64: b64, mime: mime});
+          console.log('[PasteComponent] sending image, mime:', mime, 'b64 length:', b64.length);
+          sendMsg("streamlit:setComponentValue", {value: val});
+        };
+        reader.readAsDataURL(file);
+        break;
+      }
+    }
+  });
+
+  // Clear button
+  clearBtn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    preview.style.display = 'none';
+    preview.src = '';
+    hint.textContent = '点击此处，然后粘贴截图 (Ctrl+V / Cmd+V)';
+    clearBtn.style.display = 'none';
+    zone.classList.remove('has-image');
+    sendMsg("streamlit:setFrameHeight", {height: document.body.scrollHeight});
+    sendMsg("streamlit:setComponentValue", {value: null});
+  });
+
+  zone.addEventListener('click', function() { zone.focus(); });
+
+  // Signal ready
+  console.log('[PasteComponent] sending componentReady');
+  sendMsg("streamlit:componentReady", {apiVersion: 1});
+  sendMsg("streamlit:setFrameHeight", {height: document.body.scrollHeight});
+  // Retry ready in case of timing issues
+  setTimeout(function() {
+    sendMsg("streamlit:componentReady", {apiVersion: 1});
+    sendMsg("streamlit:setFrameHeight", {height: document.body.scrollHeight});
+  }, 100);
+  setTimeout(function() {
+    sendMsg("streamlit:componentReady", {apiVersion: 1});
+    sendMsg("streamlit:setFrameHeight", {height: document.body.scrollHeight});
+  }, 500);
+</script>
+</body>
+</html>

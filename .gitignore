@@ -68,3 +68,22 @@ fix_model.py
 
 # 测试文件不提交
 agentic_rag/doc_test/
+
+# 本地运行数据与生成产物
+data_store/
+sessions.json
+faiss_index/
+topo_store/
+topo_store_lab13/
+
+# 评测输出
+eval/results/
+eval/retrieval/results/
+eval/figures/
+
+# IDE 私有规则
+.cursor/rules/AI.mdc
+
+# 本地论文草稿
+论文/
+刘保莉专硕毕业论文初稿_版本V4.pdf

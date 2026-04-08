@@ -1,22 +1,16 @@
-from email import message
 import json
 import re
+import threading
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
-# from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from agentic_rag.rag import RAGAgent
-from agentic_rag.topo_rag import TopoRetriever
-# 1. 【新增】引入搜索工具
-from agentic_rag.web_search import WebSearch 
-from dataclasses import dataclass, field
-from agentic_rag.utils import extract_excerpt, _coerce_to_text
-from agentic_rag.socratic.ping_controller import handle_ping_socratic
+from agentic_rag.web_search import WebSearch
+from dataclasses import dataclass
+from agentic_rag.utils import _coerce_to_text
 from agentic_rag.llm_config import build_chat_llm
 from .prompts import (
-    RELEVANCE_PROMPT,
-    CATEGORY_DETECT_PROMPT,
     BASE_PROMPT_LAB,
     BASE_PROMPT_THEORY,
     BASE_PROMPT_REVIEW,
@@ -25,8 +19,60 @@ from .prompts import (
     STRATEGY_THEORY,
     STRATEGY_REVIEW,
     STRATEGY_CALC,
-    HINT_JUDGE_PROMPT  # <--- [新增] 从 prompts.py 导入
+    UNIFIED_CLASSIFICATION_PROMPT,
+    BASE_PROMPT_GENERAL,
 )
+
+# topo_rag 依赖 PIL / python-docx / OpenAI 等组件，延迟导入避免拖慢启动
+_topo_retriever = None
+_topo_lock = threading.Lock()
+
+
+def _get_topo_retriever():
+    global _topo_retriever
+    if _topo_retriever is None:
+        with _topo_lock:
+            if _topo_retriever is None:
+                from agentic_rag.topo_rag import TopoRetriever
+                _topo_retriever = TopoRetriever
+    return _topo_retriever
+
+
+# 各分类的 hint_level 上限
+_MAX_HINT_LEVEL = {
+    "LAB_TROUBLESHOOTING": 3,   # 4 级：诊断→根因→修复指导→完整解决
+    "THEORY_CONCEPT": 1,        # 2 级：简明解释→全面讲透
+    "CONFIG_REVIEW": 2,         # 3 级：定位错误→原因+修正→完整方案
+    "CALCULATION": 1,           # 2 级：公式+思路→完整演算
+}
+
+_BASE_PROMPTS = {
+    "LAB_TROUBLESHOOTING": BASE_PROMPT_LAB,
+    "THEORY_CONCEPT": BASE_PROMPT_THEORY,
+    "CONFIG_REVIEW": BASE_PROMPT_REVIEW,
+    "CALCULATION": BASE_PROMPT_CALC,
+}
+
+_STRATEGIES = {
+    "LAB_TROUBLESHOOTING": STRATEGY_LAB,
+    "THEORY_CONCEPT": STRATEGY_THEORY,
+    "CONFIG_REVIEW": STRATEGY_REVIEW,
+    "CALCULATION": STRATEGY_CALC,
+}
+
+_SECONDARY_LABEL = {
+    "CALCULATION": "计算与分析",
+    "LAB_TROUBLESHOOTING": "实验故障排查",
+    "CONFIG_REVIEW": "配置操作与审查",
+    "THEORY_CONCEPT": "基础概念与原理",
+}
+
+_IDENTITY_KEYWORDS = ["你是谁", "你是什么", "who are you", "what are you", "自我介绍", "介绍一下你自己"]
+_IDENTITY_REPLY = "我是计算机网络实验课 AI 助教，基于大语言模型技术，并经过课程知识库的专属优化。我可以帮你理解网络理论、排查实验故障、审查配置和辅导计算题。有什么网络问题可以问我！"
+
+action_re = re.compile(r'^工具：(\w+)：(.*)$')
+_EXPERIMENT_ID_RE = re.compile(r"(?:实验\s*|lab[\s_-]?)(\d+)", re.IGNORECASE)
+
 
 class Evidence(TypedDict):
     id: str
@@ -34,442 +80,634 @@ class Evidence(TypedDict):
     excerpt: str
     raw_text: str
 
+
 class AgentState(TypedDict, total=False):
     user_message: str
     evidences: List[Evidence]
     hint_level: int
-    user_turn_count: int         # 总轮次
-    turns_at_current_level: int  # [新增] 在当前 Level 停留的连续轮次
-    question_category: str       # 记录问题分类
-    mode: str                    # "socratic" | "direct"
+    user_turn_count: int
+    turns_at_current_level: int
+    lab_turn_count: int
+    question_category: str
+    mode: str
+    experiment_id: str
+    experiment_label: str
 
-client = build_chat_llm(temperature=0)
+
+# 延迟初始化 LLM 客户端
+_client = None
+_client_lock = threading.Lock()
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        with _client_lock:
+            if _client is None:
+                _client = build_chat_llm(temperature=0)
+    return _client
+
 
 # -------------------------------------------------------------------------
-# [新增] 辅助函数：格式化历史记录用于 Context
+# 辅助函数
 # -------------------------------------------------------------------------
+
 def _format_history_context(history: List[BaseMessage], limit: int = 3) -> str:
-    """
-    提取最近几轮对话作为上下文背景。
-    """
     if not history:
         return "（无历史对话）"
-    
     context_str = ""
-    # 取最后 limit * 2 条消息（User+AI）以防止 token 溢出
-    recent_msgs = history[-(limit*2):]
+    recent_msgs = history[-(limit * 2):]
     for m in recent_msgs:
         role = "AI" if isinstance(m, AIMessage) else "User"
-        # 简单截断过长的内容
         content = m.content[:200] + "..." if len(m.content) > 200 else m.content
         context_str += f"{role}: {content}\n"
     return context_str
 
+
+def _get_base_prompt(category: str) -> str:
+    return _BASE_PROMPTS.get(category, BASE_PROMPT_LAB)
+
+
+def _get_strategy_prompt(level: int, category: str) -> str:
+    target_dict = _STRATEGIES.get(category, STRATEGY_LAB)
+    return target_dict.get(level, target_dict[max(target_dict.keys())])
+
+
+def _format_citations(citations: List[Dict[str, Any]]) -> str:
+    if not citations:
+        return ""
+    lines = [f"[{c.get('id')}] {c.get('source', 'unknown')}" for c in citations]
+    return "引用：\n" + "\n".join(lines)
+
+
+def _extract_experiment_id(text: str) -> Optional[str]:
+    match = _EXPERIMENT_ID_RE.search(text or "")
+    if not match:
+        return None
+    return f"lab{int(match.group(1))}"
+
+
+def _experiment_label(experiment_id: str) -> str:
+    match = re.search(r"lab(\d+)$", experiment_id or "", re.IGNORECASE)
+    if match:
+        return f"实验{int(match.group(1))}"
+    return experiment_id
+
+
+def _resolve_experiment_context(
+    question: str,
+    history: List[BaseMessage],
+    state: Dict[str, Any],
+) -> Tuple[Optional[str], Optional[str]]:
+    current = _extract_experiment_id(question)
+    if current:
+        label = _experiment_label(current)
+        state["experiment_id"] = current
+        state["experiment_label"] = label
+        return current, label
+
+    if state.get("experiment_id"):
+        experiment_id = state.get("experiment_id")
+        label = state.get("experiment_label") or _experiment_label(experiment_id)
+        state["experiment_label"] = label
+        return experiment_id, label
+
+    for msg in reversed(history):
+        experiment_id = _extract_experiment_id(getattr(msg, "content", ""))
+        if experiment_id:
+            label = _experiment_label(experiment_id)
+            state["experiment_id"] = experiment_id
+            state["experiment_label"] = label
+            return experiment_id, label
+
+    return None, None
+
+
 # -------------------------------------------------------------------------
-# [修改] 相关性检查函数 (增加 history 参数)
+# 三合一统一分类
 # -------------------------------------------------------------------------
-def check_relevance(question: str, history: List[BaseMessage]) -> bool:
-    """
-    判断用户问题是否与计算机网络课程相关（含理论与实验）。
-    返回: True (相关) | False (无关)
-    """
-    q_str = (question or "").strip()
-    if not q_str:
-        return True # 空消息放行
 
-    # 快速放行常见交互词
-    greetings = ["你好", "hello", "hi", "谢谢", "再见", "help", "救命", "提示", "是什么", "what is"]
-    if len(q_str) < 15 and any(g in q_str.lower() for g in greetings):
-        return True
-
-    # 1. 准备上下文
-    context_str = _format_history_context(history, limit=2)
-
-    # 2. 构造 Prompt
-    prompt_content = f"【对话历史】:\n{context_str}\n\n【用户当前输入】: {q_str}"
-
-    messages = [
-        SystemMessage(content=RELEVANCE_PROMPT),
-        HumanMessage(content=prompt_content)
-    ]
-    
-    try:
-        response = client.invoke(messages)
-        result = response.content.strip().upper()
-        return "NO" not in result
-    except Exception as e:
-        print(f"[Warning] Relevance check failed: {e}, defaulting to relevant.")
-        return True
-
-# -------------------------------------------------------------------------
-# [修改] 问题分类器 (增加 history 参数)
-# -------------------------------------------------------------------------
-def detect_question_category(question: str, history: List[BaseMessage]) -> str:
-    """
-    将问题归类为四大场景之一，结合上下文判断。
-    """
-    # 1. 准备上下文
-    context_str = _format_history_context(history, limit=2)
-    
-    # 2. 构造 Prompt
-    prompt_content = f"【对话历史】:\n{context_str}\n\n【用户当前输入】: {question}"
-
-    messages = [
-        SystemMessage(content=CATEGORY_DETECT_PROMPT),
-        HumanMessage(content=prompt_content)
-    ]
-    try:
-        response = client.invoke(messages)
-        content = response.content.strip().upper()
-        if "THEORY" in content: return "THEORY_CONCEPT"
-        if "REVIEW" in content: return "CONFIG_REVIEW"
-        if "CALC" in content: return "CALCULATION"
-        return "LAB_TROUBLESHOOTING" # 默认兜底
-    except Exception:
+def _parse_category(raw) -> str:
+    s = (raw or "").upper()
+    if "CALC" in s:
+        return "CALCULATION"
+    if "LAB" in s or "TROUBLE" in s:
         return "LAB_TROUBLESHOOTING"
+    if "REVIEW" in s or "CONFIG" in s:
+        return "CONFIG_REVIEW"
+    if "THEORY" in s or "CONCEPT" in s:
+        return "THEORY_CONCEPT"
+    return ""
 
-# -------------------------------------------------------------------------
-# [新增] 动态 Base Prompt 生成器
-# -------------------------------------------------------------------------
-def get_base_prompt(category: str) -> str:
-    """
-    根据问题分类，返回完全不同的 System Prompt 框架。
-    """
-    
-    # 1. 实验与排错
-    prompt_lab = BASE_PROMPT_LAB
 
-    # 2. 理论与概念
-    prompt_theory = BASE_PROMPT_THEORY
-    
-    # 3. 配置审查
-    prompt_review = BASE_PROMPT_REVIEW
-    
-    # 4. 计算与分析
-    prompt_calc = BASE_PROMPT_CALC
+_DEFAULT_CLASSIFICATION = {"relevance": True, "category": "LAB_TROUBLESHOOTING", "secondary_categories": [], "hint_decision": "MAINTAIN"}
 
-    mapping = {
-        "LAB_TROUBLESHOOTING": prompt_lab,
-        "THEORY_CONCEPT": prompt_theory,
-        "CONFIG_REVIEW": prompt_review,
-        "CALCULATION": prompt_calc
-    }
-    
-    return mapping.get(category, prompt_lab)
 
-# -------------------------------------------------------------------------
-# [修改] Hint Level 管理逻辑 (使用新的 _format_history_context)
-# -------------------------------------------------------------------------
-def determine_hint_level(state: Dict[str, Any], user_question: str, history: List[BaseMessage]) -> int:
-    """
-    决定当前的提示等级。
-    """
+def classify_unified(
+    question: str,
+    history: List[BaseMessage],
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """单次 LLM 调用同时返回 relevance / category / secondary_categories / hint_decision。"""
+    q_str = (question or "").strip()
+
+    greetings = ["你好", "hello", "hi", "谢谢", "再见", "help", "救命", "提示", "what is"]
+    if not q_str:
+        return dict(_DEFAULT_CLASSIFICATION)
+    if len(q_str) < 15 and any(g in q_str.lower() for g in greetings):
+        return dict(_DEFAULT_CLASSIFICATION)
+
     current_level = state.get("hint_level", 0)
-    turns_at_level = state.get("turns_at_current_level", 0)
-    
-    # 达到最高等级后不再判断，直接返回
-    if current_level >= 3:
-        state["turns_at_current_level"] = turns_at_level + 1
-        return 3
+    context_str = _format_history_context(history, limit=2)
+    prompt_content = f"【对话历史】:\n{context_str}\n\n【用户当前输入】: {q_str}"
+    system_prompt = UNIFIED_CLASSIFICATION_PROMPT.format(current_level=current_level)
 
-    # 准备 AI 裁判的输入上下文 (使用新的辅助函数)
-    recent_history_str = _format_history_context(history, limit=2)
-    
-    # 使用从 prompts.py 导入的 HINT_JUDGE_PROMPT
-    judge_prompt = HINT_JUDGE_PROMPT.format(current_level=current_level)
-    judge_input = f"对话历史:\n{recent_history_str}\n当前用户输入: {user_question}"
-    
     messages = [
-        SystemMessage(content=judge_prompt),
-        HumanMessage(content=judge_input)
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=prompt_content),
     ]
 
-    # 1. 调用 AI 裁判
-    decision = "MAINTAIN"
     try:
-        response = client.invoke(messages)
-        content = response.content.strip().upper()
-        if "INCREASE" in content:
-            decision = "INCREASE"
+        response = _get_client().invoke(messages)
+        content = response.content.strip()
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group())
         else:
-            decision = "MAINTAIN"
+            raise ValueError(f"No JSON found in response: {content}")
+
+        relevance = "NO" not in (data.get("relevance", "YES") or "YES").upper()
+
+        raw_cat = data.get("category", [])
+        if isinstance(raw_cat, str):
+            raw_cat = [raw_cat]
+        parsed = [c for c in (_parse_category(c) for c in raw_cat) if c]
+        if not parsed:
+            parsed = ["LAB_TROUBLESHOOTING"]
+
+        primary_category = parsed[0]
+        secondary_categories = [c for c in parsed[1:] if c != primary_category]
+
+        raw_hint = (data.get("hint_decision", "MAINTAIN") or "").upper()
+        if "JUMP_TO_MAX" in raw_hint:
+            hint_decision = "JUMP_TO_MAX"
+        elif "INCREASE" in raw_hint:
+            hint_decision = "INCREASE"
+        else:
+            hint_decision = "MAINTAIN"
+
+        return {
+            "relevance": relevance,
+            "category": primary_category,
+            "secondary_categories": secondary_categories,
+            "hint_decision": hint_decision,
+        }
+
     except Exception as e:
-        print(f"[Warning] Hint Judge failed: {e}, keeping level.")
-        decision = "MAINTAIN"
+        print(f"[Warning] Unified classification failed: {e}, using safe defaults.")
+        return dict(_DEFAULT_CLASSIFICATION)
 
-    # 2. 计算新 Level (结合 AI 决策与轮次兜底)
-    new_level = current_level
-    
-    if decision == "INCREASE":
-        new_level = current_level + 1
-        turns_at_level = 0 # 重置计数器
-        print(f"[Hint Logic] AI decided to INCREASE to level {new_level}")
-    else:
-        # AI 决定保持，检查兜底逻辑
-        turns_at_level += 1
-        if turns_at_level >= 3:
-            new_level = current_level + 1
-            turns_at_level = 0 # 重置计数器
-            print(f"[Hint Logic] Failsafe triggered (3 turns stuck). FORCED INCREASE to level {new_level}")
-        else:
-            print(f"[Hint Logic] Maintaining level {current_level} (Streak: {turns_at_level}/3)")
-
-    # 确保不超过 3
-    new_level = min(new_level, 3)
-    
-    # 更新 State
-    state["turns_at_current_level"] = turns_at_level
-    
-    return new_level
 
 # -------------------------------------------------------------------------
-# [升级版] Hint Strategy 生成器 (支持分类)
+# Agent 类
 # -------------------------------------------------------------------------
-def get_strategy_prompt(level: int, category: str) -> str:
-    """
-    根据 Level 和 Category 返回具体的指导策略。
-    """
-    # 1. LAB_TROUBLESHOOTING
-    s_lab = STRATEGY_LAB
 
-    # 2. THEORY_CONCEPT
-    s_theory = STRATEGY_THEORY
-
-    # 3. CONFIG_REVIEW
-    s_review = STRATEGY_REVIEW
-
-    # 4. CALCULATION
-    s_calc = STRATEGY_CALC
-    
-    strategies = {
-        "LAB_TROUBLESHOOTING": s_lab,
-        "THEORY_CONCEPT": s_theory,
-        "CONFIG_REVIEW": s_review,
-        "CALCULATION": s_calc
-    }
-    
-    target_dict = strategies.get(category, s_lab)
-    return target_dict.get(level, target_dict[0])
-
-# -------------------------------------------------------------------------
-# [原功能] 其他辅助函数
-# -------------------------------------------------------------------------
-def call_rag_and_record(state: AgentState, query: str) -> str:
-    raw = RAGAgent(query)
-    raw_text = _coerce_to_text(raw)
-    evidences = state.get("evidences", [])
-    eid = f"E{len(evidences) + 1}"
-    evidences.append({
-        "id": eid,
-        "query": query,
-        "excerpt": extract_excerpt(raw),
-        "raw_text": raw_text
-    })
-    state["evidences"] = evidences
-    return raw_text
-
-def retrieve_evidence_node(state: AgentState) -> AgentState:
-    user_msg = state["user_message"]
-    queries = [
-        f"{user_msg} 相关定义与原理",
-        f"{user_msg} 实验步骤与检查点",
-        f"{user_msg} 常见错误原因与排查",
-    ]
-    for q in queries:
-        _ = call_rag_and_record(state, q)
-    return state
-
-# -------------------------------------------------------------------------
-# [关键修改] Agent 类 - 修复 SystemMessage 顺序和 History 处理
-# -------------------------------------------------------------------------
 class Agent():
     def __init__(self, prompt, history):
-        self.prompt = prompt
-        self.messages = [] 
-        
-        # 1. SystemMessage 必须放在最前面，确保 AI 首先看到身份设定
-        if self.prompt: 
+        self.messages = []
+        if prompt:
             self.messages.append(SystemMessage(content=prompt))
-            
-        # 2. 紧接着追加历史记录
         if history:
             self.messages.extend(history)
 
-    def __call__(self, message) :
-        # 注意：这里我们只处理当前的 LLM 调用逻辑
-        # 历史记录的永久保存逻辑移到了 query 函数最后，避免重复和混乱
+    def __call__(self, message):
         self.messages.append(HumanMessage(content=message))
-        
-        result = self.execute() 
-        self.messages.append(AIMessage(content=result)) 
-        
+        result = self.execute()
+        self.messages.append(AIMessage(content=result))
         return result
 
     def execute(self):
-        response = client.invoke(self.messages)
+        response = _get_client().invoke(self.messages)
         return response.content
 
-known_actions={
-    "检索": RAGAgent,
-    "拓扑":TopoRetriever,
-    "搜索": WebSearch, 
-}
+    def execute_stream(self):
+        """流式版 execute()，逐 token yield，完成后保存完整文本。"""
+        full_text = ""
+        for token in _get_client().invoke_stream(self.messages):
+            full_text += token
+            yield token
+        self._last_stream_result = full_text
 
-action_re = re.compile(r'^工具：(\w+)：(.*)$')
 
 # -------------------------------------------------------------------------
-# [修改] 主流程 Query (整合分类逻辑 + 新Hint逻辑 + 修复记忆功能)
+# _prepare_context：query() 和 query_stream() 的共用前置逻辑
 # -------------------------------------------------------------------------
+
+@dataclass
+class _QueryContext:
+    """_prepare_context 的返回值，封装分类、Hint、Prompt 等预处理结果。"""
+    # 快速拦截结果（身份/无关问题），非 None 时直接返回此回复
+    early_reply: Optional[str]
+    # 是否走通用 LLM（无关问题，不使用 RAG/工具）
+    use_general_llm: bool
+    # 以下字段仅在非快速拦截时有效
+    final_prompt: str
+    category: str
+    hint_level: int
+    contextual_actions: Dict[str, Any]
+    debug_info: Optional[str]
+
+
+def _prepare_context(
+    question: str,
+    history: List[BaseMessage],
+    state: Dict[str, Any],
+    user_id: Optional[str],
+    enable_websearch: bool,
+    debug: bool,
+) -> _QueryContext:
+    """
+    query() 和 query_stream() 共用的前置逻辑：
+    state 初始化、身份拦截、分类、Hint Level 计算、Prompt 组装。
+    会原地修改 state。
+    """
+    # 初始化 state 计数器
+    state.setdefault("turns_at_current_level", 0)
+    state.setdefault("user_turn_count", 0)
+    state.setdefault("lab_turn_count", 0)
+
+    # 水平个性化：新会话根据学生水平设置初始 Hint Level
+    if "hint_level" not in state and user_id:
+        from storage.proficiency import get_initial_hint_level
+        state["hint_level"] = get_initial_hint_level(user_id)
+
+    state["user_turn_count"] += 1
+
+    q = (question or "").strip()
+    q_low = q.lower()
+
+    # 身份类问题快速拦截
+    if len(q) < 20 and any(kw in q_low for kw in _IDENTITY_KEYWORDS):
+        return _QueryContext(
+            early_reply=_IDENTITY_REPLY,
+            use_general_llm=False,
+            final_prompt="", category="", hint_level=0,
+            contextual_actions={}, debug_info=None,
+        )
+
+    # 三合一分类
+    classification = classify_unified(q, history, state)
+
+    # 无关问题 → 通用 LLM
+    if not classification["relevance"]:
+        if debug:
+            print(f"[General] Routing irrelevant query to general LLM: '{question}'")
+        return _QueryContext(
+            early_reply=None,
+            use_general_llm=True,
+            final_prompt=BASE_PROMPT_GENERAL,
+            category="", hint_level=0,
+            contextual_actions={}, debug_info=None,
+        )
+
+    # 问题分类
+    category = classification["category"]
+    if category == "LAB_TROUBLESHOOTING":
+        state["lab_turn_count"] += 1
+    state["question_category"] = category
+
+    experiment_id, experiment_label = _resolve_experiment_context(q, history, state)
+
+    # Hint Level 计算（含 failsafe 逻辑）
+    current_level = state.get("hint_level", 0)
+    state["_hint_level_start"] = current_level
+    turns_at_level = state.get("turns_at_current_level", 0)
+    max_level = _MAX_HINT_LEVEL.get(category, 3)
+
+    if current_level >= max_level:
+        current_hint_level = max_level
+        state["turns_at_current_level"] = turns_at_level + 1
+    else:
+        hint_decision = classification["hint_decision"]
+        if hint_decision == "JUMP_TO_MAX":
+            current_hint_level = max_level
+            turns_at_level = 0
+            print(f"[Hint Logic] AI decided to JUMP_TO_MAX -> level {max_level}")
+        elif hint_decision == "INCREASE":
+            current_hint_level = current_level + 1
+            turns_at_level = 0
+            print(f"[Hint Logic] AI decided to INCREASE to level {current_hint_level}")
+        else:
+            turns_at_level += 1
+            if turns_at_level >= 3:
+                current_hint_level = current_level + 1
+                turns_at_level = 0
+                print(f"[Hint Logic] Failsafe triggered (3 turns stuck). FORCED INCREASE to level {current_hint_level}")
+            else:
+                current_hint_level = current_level
+                print(f"[Hint Logic] Maintaining level {current_level} (Streak: {turns_at_level}/3)")
+        current_hint_level = min(current_hint_level, max_level)
+        state["turns_at_current_level"] = turns_at_level
+
+    # LAB 3 轮强制收敛
+    if category == "LAB_TROUBLESHOOTING" and state["lab_turn_count"] >= 3:
+        current_hint_level = max_level
+    state["hint_level"] = current_hint_level
+
+    # 水平采集记录
+    state["_hint_decision"] = classification.get("hint_decision", "MAINTAIN")
+    state["_was_failsafe"] = bool(
+        classification.get("hint_decision") != "INCREASE"
+        and current_hint_level > current_level
+    )
+
+    # 组装最终 Prompt
+    base_prompt_template = _get_base_prompt(category)
+    strategy_instruction = _get_strategy_prompt(current_hint_level, category)
+    final_prompt = base_prompt_template.format(current_strategy_instruction=strategy_instruction)
+
+    if category == "LAB_TROUBLESHOOTING" and state["lab_turn_count"] >= 3:
+        final_prompt += (
+            "\n\n【三轮硬约束】\n"
+            "这是第 3 轮对话。你必须在本轮收敛：给出可执行的排查路径与最关键的操作点，"
+            "不强制学生再回答。可以附 1 个可选问题，但不能依赖学生回答才能推进。"
+        )
+
+    # 注入次要分类任务（复合问题）
+    secondary_categories = classification.get("secondary_categories", [])
+    if secondary_categories:
+        secondary_desc = "、".join(_SECONDARY_LABEL.get(c, c) for c in secondary_categories)
+        final_prompt += (
+            f"\n\n【复合问题补充任务】\n"
+            f"本问题同时涉及以下次要诉求：{secondary_desc}。\n"
+            f"请在完成主要任务后，按顺序简要处理上述次要诉求。次要任务无需完整展开，以满足学生当前的实际需要为准。"
+        )
+
+    # 注入学生水平上下文
+    if user_id:
+        from storage.proficiency import get_proficiency_summary
+        prof_summary = get_proficiency_summary(user_id)
+        if prof_summary:
+            final_prompt += f"\n\n【学生水平参考】\n{prof_summary}"
+
+    if experiment_id and experiment_label:
+        final_prompt += (
+            f"\n\n【实验上下文】\n"
+            f"当前会话已识别为 {experiment_label}（{experiment_id}）。"
+            f"如果需要调用拓扑工具，只使用该实验下审核通过的拓扑 JSON，不要混用其他实验数据。"
+        )
+
+    debug_info = None
+    if debug:
+        debug_info = (
+            f"[DEBUG] Cat: {category} | Secondary: {secondary_categories} | "
+            f"Lvl: {current_hint_level} | Exp: {experiment_id or '-'}"
+        )
+        print(debug_info)
+        print(f"[DEBUG] Strategy: {strategy_instruction[:50]}...")
+
+    # 构建工具表
+    def _rag_with_context(msg: str):
+        return RAGAgent(msg, category=category, hint_level=current_hint_level)
+
+    contextual_actions = {
+        "检索": _rag_with_context,
+        "拓扑": lambda q: _get_topo_retriever()(q, experiment_id=state.get("experiment_id")),
+    }
+    if enable_websearch:
+        contextual_actions["搜索"] = WebSearch
+
+    return _QueryContext(
+        early_reply=None,
+        use_general_llm=False,
+        final_prompt=final_prompt,
+        category=category,
+        hint_level=current_hint_level,
+        contextual_actions=contextual_actions,
+        debug_info=debug_info,
+    )
+
+
+# -------------------------------------------------------------------------
+# 工具调用循环的共用辅助
+# -------------------------------------------------------------------------
+
+def _execute_tool_action(
+    action_match,
+    contextual_actions: Dict[str, Any],
+    tool_traces: List[Dict[str, Any]],
+    last_citations: List[Dict[str, Any]],
+) -> str:
+    """执行单次工具调用，返回观察结果文本。"""
+    action, action_input = action_match.groups()
+    if action not in contextual_actions:
+        raise Exception(f"Unknown action: {action}: {action_input}")
+
+    observation = contextual_actions[action](action_input)
+    if isinstance(observation, dict) and observation.get("citations"):
+        last_citations.clear()
+        last_citations.extend(observation.get("citations") or [])
+
+    obs_output_str = _coerce_to_text(observation)
+    tool_traces.append({
+        "tool": action,
+        "input": action_input,
+        "output": obs_output_str[:2000],
+    })
+    return f"检索结果：{obs_output_str}"
+
+
+def _find_action(text: str):
+    """从 LLM 输出中提取第一个工具调用匹配。"""
+    for line in (text or "").split("\n"):
+        m = action_re.match(line)
+        if m:
+            return m
+    return None
+
+
+# -------------------------------------------------------------------------
+# 主流程 Query（同步版）
+# -------------------------------------------------------------------------
+
 def query(
     question: str,
     history: Optional[List[BaseMessage]] = None,
     max_turns: int = 5,
     debug: bool = False,
     state: Optional[Dict[str, Any]] = None,
+    user_id: Optional[str] = None,
+    enable_websearch: bool = True,
 ) -> Tuple[str, List[BaseMessage], List[Dict[str, Any]], Dict[str, Any]]:
-    
     if history is None:
         history = []
     if state is None:
         state = {}
 
-    # 初始化 state 中的计数器 (如果是第一次调用)
-    if "turns_at_current_level" not in state:
-        state["turns_at_current_level"] = 0
-    if "user_turn_count" not in state:
-        state["user_turn_count"] = 0
+    ctx = _prepare_context(question, history, state, user_id, enable_websearch, debug)
+    q = (question or "").strip()
 
-    # 1. 相关性检查 (传入 History)
-    is_relevant = check_relevance(question, history)
-    if not is_relevant:
-        reply = "与本课程无关，不予回答。"
-        # 无关问题也存入历史，保持对话连贯性（可选）
+    # 快速拦截（身份类）
+    if ctx.early_reply is not None:
+        history.append(HumanMessage(content=question))
+        history.append(AIMessage(content=ctx.early_reply))
+        return ctx.early_reply, history, [], state
+
+    # 无关问题 → 通用 LLM
+    if ctx.use_general_llm:
+        bot = Agent(ctx.final_prompt, history)
+        reply = bot(q)
         history.append(HumanMessage(content=question))
         history.append(AIMessage(content=reply))
-        if debug:
-            print(f"[Guardrail] Blocked irrelevant query: '{question}'")
         return reply, history, [], state
 
-    # 2. Ping 场景特殊处理
-    q = (question or "").strip()
-    q_low = q.lower()
-    ping_trigger = (
-        ("ping" in q_low)
-        or ("不通" in q)
-        or ("连不通" in q)
-        or ("超时" in q)
-        or ("不可达" in q)
-        or ("unreachable" in q_low)
-        or ("timed out" in q_low)
-    )
-    if ping_trigger:
-        reply, history, tool_traces, new_state = handle_ping_socratic(
-            user_message=q,
-            history=history,
-            state_dict=state,
-        )
-        return reply, history, tool_traces, (new_state or {})
-
-    # -----------------------------
-    # 3. 计算 Hint Level & 判断问题分类
-    # -----------------------------
-    state["user_turn_count"] += 1 # 增加总轮次
-
-    # (B) 识别问题分类 (传入 History)
-    # 结合 History，AI 不会再把 "2" 误判为 LAB，而是保持为 CALCULATION
-    category = detect_question_category(q, history)
-    
-    # 按照要求：这里不进行 Level 重置，直接更新分类即可
-    state["question_category"] = category
-
-    # (A) 计算 Level (传入 History)
-    current_hint_level = determine_hint_level(state, q, history)
-    state["hint_level"] = current_hint_level
-    
-    # (C) 获取 System Prompt 模板
-    base_prompt_template = get_base_prompt(category)
-    
-    # (D) 获取 Strategy Instruction
-    strategy_instruction = get_strategy_prompt(current_hint_level, category)
-    
-    # (E) 组装最终 Prompt
-    final_prompt = base_prompt_template.format(current_strategy_instruction=strategy_instruction)
-
-    if debug:
-        print(f"[DEBUG] Cat: {category} | Lvl: {current_hint_level}")
-        print(f"[DEBUG] Strategy: {strategy_instruction[:50]}...")
-
-    # -----------------------------
-    # 4. Agent 执行循环
-    # -----------------------------
-    i = 0
-    # 将 history 传入 Agent 初始化，确保 AI 知道上下文
-    bot = Agent(final_prompt, history)
-    
+    # Agent 执行循环
+    bot = Agent(ctx.final_prompt, history)
     next_prompt = q
     tool_traces: List[Dict[str, Any]] = []
     last_citations: List[Dict[str, Any]] = []
-    final_result = "" # 用于保存最终生成的回答
+    final_result = ""
 
-    def _format_citations(citations: List[Dict[str, Any]]) -> str:
-        if not citations:
-            return ""
-        lines = [f"[{c.get('id')}] {c.get('source', 'unknown')}" for c in citations]
-        return "引用：\n" + "\n".join(lines)
-
-    while i < max_turns:
-        i += 1
-        # 调用 Agent，获取回答
+    for i in range(max_turns):
         result = bot(next_prompt)
-        final_result = result # 暂存结果
+        final_result = result
 
         if debug:
-            print(f"Turn {i}: {result[:50]}...")
+            print(f"Turn {i + 1}: {result[:50]}...")
 
-        actions = [
-            action_re.match(a)
-            for a in (result or "").split("\n")
-            if action_re.match(a)
-        ]
-
-        if actions:
-            action, action_input = actions[0].groups()
-            if action not in known_actions:
-                raise Exception(f"Unknown action: {action}: {action_input}")
-
-            observation = known_actions[action](action_input)
-            if isinstance(observation, dict) and observation.get("citations"):
-                last_citations = observation.get("citations") or []
-
-            obs_output_str = _coerce_to_text(observation)
-
-            tool_traces.append({
-                "tool": action,
-                "input": action_input,
-                "output": obs_output_str[:2000],
-            })
-
-            # 工具调用后，更新 next_prompt 并继续循环
-            next_prompt = f"检索结果：{obs_output_str}"
+        action_match = _find_action(result)
+        if action_match:
+            next_prompt = _execute_tool_action(
+                action_match, ctx.contextual_actions, tool_traces, last_citations
+            )
             continue
 
-        # 如果没有动作，说明是最终回答
         break
-    
-    # 添加引用（如果有）
+
+    # 追加引用
     if last_citations and "引用：" not in (final_result or ""):
         final_result = (final_result or "").rstrip() + "\n\n" + _format_citations(last_citations)
-        
-    # -------------------------------------------------------------------------
-    # 【关键修复】更新历史记忆
-    # -------------------------------------------------------------------------
-    # 只有当成功获得回答后，才将这一轮的 User/AI 交互存入 history
+
     if final_result:
         history.append(HumanMessage(content=question))
         history.append(AIMessage(content=final_result))
 
     return final_result, history, tool_traces, (state or {})
 
+
+# -------------------------------------------------------------------------
+# 流式版 query
+# -------------------------------------------------------------------------
+
+def query_stream(
+    question: str,
+    history: Optional[List[BaseMessage]] = None,
+    max_turns: int = 5,
+    debug: bool = False,
+    state: Optional[Dict[str, Any]] = None,
+    user_id: Optional[str] = None,
+    enable_websearch: bool = True,
+):
+    """
+    流式版 query()。yield 字典：
+      {"type": "token", "content": "..."}   — 流式 token
+      {"type": "done", "result": str, "history": List, "tool_traces": List, "state": Dict}
+    """
+    if history is None:
+        history = []
+    if state is None:
+        state = {}
+
+    ctx = _prepare_context(question, history, state, user_id, enable_websearch, debug)
+    q = (question or "").strip()
+
+    # 快速拦截（身份类）
+    if ctx.early_reply is not None:
+        history.append(HumanMessage(content=question))
+        history.append(AIMessage(content=ctx.early_reply))
+        yield {"type": "token", "content": ctx.early_reply}
+        yield {"type": "done", "result": ctx.early_reply, "history": history,
+               "tool_traces": [], "state": state}
+        return
+
+    # 无关问题 → 通用 LLM（流式）
+    if ctx.use_general_llm:
+        bot = Agent(ctx.final_prompt, history)
+        bot.messages.append(HumanMessage(content=q))
+        final_result = ""
+        for token in bot.execute_stream():
+            final_result += token
+            yield {"type": "token", "content": token}
+        history.append(HumanMessage(content=question))
+        history.append(AIMessage(content=final_result))
+        yield {"type": "done", "result": final_result, "history": history,
+               "tool_traces": [], "state": state}
+        return
+
+    # Agent 循环（流式）
+    bot = Agent(ctx.final_prompt, history)
+    next_prompt = q
+    tool_traces: List[Dict[str, Any]] = []
+    last_citations: List[Dict[str, Any]] = []
+    final_result = ""
+
+    for i in range(max_turns):
+        bot.messages.append(HumanMessage(content=next_prompt))
+
+        accumulated = ""
+        found_action = False
+        started_forwarding = False
+
+        for token in bot.execute_stream():
+            accumulated += token
+
+            if not started_forwarding:
+                lines = accumulated.split("\n")
+                for line in lines[:-1]:
+                    if action_re.match(line.strip()):
+                        found_action = True
+                        break
+
+                if found_action:
+                    break
+
+                if len(lines) > 2 or (len(accumulated) > 80 and "\n" in accumulated):
+                    started_forwarding = True
+                    yield {"type": "token", "content": accumulated}
+            else:
+                yield {"type": "token", "content": token}
+
+        full_turn_text = getattr(bot, '_last_stream_result', accumulated)
+        bot.messages.append(AIMessage(content=full_turn_text))
+
+        if found_action:
+            action_match = _find_action(full_turn_text)
+            if action_match:
+                next_prompt = _execute_tool_action(
+                    action_match, ctx.contextual_actions, tool_traces, last_citations
+                )
+                continue
+
+        final_result = full_turn_text
+        break
+
+    # 引用
+    if last_citations and "引用：" not in (final_result or ""):
+        citation_text = _format_citations(last_citations)
+        final_result = (final_result or "").rstrip() + "\n\n" + citation_text
+        yield {"type": "token", "content": "\n\n" + citation_text}
+
+    if final_result:
+        history.append(HumanMessage(content=question))
+        history.append(AIMessage(content=final_result))
+
+    yield {"type": "done", "result": final_result, "history": history,
+           "tool_traces": tool_traces, "state": state or {}}
+
+
+# -------------------------------------------------------------------------
+# 消息序列化
+# -------------------------------------------------------------------------
 
 def messages_to_dicts(messages: List[BaseMessage]) -> List[Dict[str, str]]:
     out = []
@@ -481,6 +719,7 @@ def messages_to_dicts(messages: List[BaseMessage]) -> List[Dict[str, str]]:
             role = "system"
         out.append({"role": role, "content": m.content})
     return out
+
 
 def dicts_to_messages(items: List[Dict[str, str]]) -> List[BaseMessage]:
     out: List[BaseMessage] = []
@@ -495,21 +734,19 @@ def dicts_to_messages(items: List[Dict[str, str]]) -> List[BaseMessage]:
             out.append(HumanMessage(content=content))
     return out
 
+
 if __name__ == "__main__":
-    # 测试相关性守卫
     print("--- Testing Relevance Guardrail ---")
     q1 = "什么是网络协议？"
-    # 初始化历史
     history_store = []
     output1, history_store, _, _ = query(q1, history=history_store, debug=True)
-    print(f"\n[Q: {q1}] => {output1[:50]}...") 
-    
+    print(f"\n[Q: {q1}] => {output1[:50]}...")
+
     q2 = "宫保鸡丁怎么做？"
     output2, history_store, _, _ = query(q2, history=history_store, debug=True)
     print(f"\n[Q: {q2}] => {output2}")
-    
-    # 测试分类器效果
+
     print("\n--- Testing Classifier & Prompt Switching ---")
-    q3 = "怎么划分子网？" 
+    q3 = "怎么划分子网？"
     output3, history_store, _, state3 = query(q3, history=history_store, debug=True)
     print(f"\n[Q: {q3}] Cat: {state3.get('question_category')}")

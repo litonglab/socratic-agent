@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import queue
 import threading
 import time
-from typing import List, Optional, Dict, Any, Iterable, Tuple
+from contextlib import asynccontextmanager
+from typing import List, Optional, Dict, Any, Iterable, Tuple, Literal
 from uuid import uuid4
 from datetime import datetime, timezone
 
@@ -19,7 +21,8 @@ from pydantic import BaseModel
 from langchain_core.messages import SystemMessage, HumanMessage
 
 # import your agent entrypoints
-from agentic_rag.agent import query, dicts_to_messages, messages_to_dicts
+from agentic_rag.agent import query, query_stream, dicts_to_messages, messages_to_dicts
+from agentic_rag.chat_format import split_visible_and_thinking
 from agentic_rag.llm_config import build_chat_llm
 from storage.auth import validate_password, validate_username, hash_password
 from storage.user_store import (
@@ -33,8 +36,14 @@ from storage.user_store import (
     update_session,
     delete_session as delete_user_session,
     list_user_sessions,
+    list_user_session_snapshots,
     append_log,
+    upsert_message_feedback,
+    delete_message_feedback,
+    get_message_feedback,
+    record_interaction_metric,
 )
+from storage.proficiency import update_proficiency_from_metric
 
 # ✅ 允许 Streamlit import 时也能加载 env
 load_dotenv()
@@ -52,6 +61,9 @@ MAX_CHAT_CONCURRENCY = int(os.getenv("MAX_CHAT_CONCURRENCY", "50"))
 CHAT_QUEUE_TIMEOUT = float(os.getenv("CHAT_QUEUE_TIMEOUT", "30"))
 CHAT_STREAM_CHUNK_SIZE = int(os.getenv("CHAT_STREAM_CHUNK_SIZE", "20"))
 CHAT_STREAM_PING_INTERVAL = float(os.getenv("CHAT_STREAM_PING_INTERVAL", "0.6"))
+MAX_RUNTIME_HISTORY_MESSAGES = int(os.getenv("MAX_RUNTIME_HISTORY_MESSAGES", "18"))
+MAX_RUNTIME_HISTORY_CHARS = int(os.getenv("MAX_RUNTIME_HISTORY_CHARS", "12000"))
+PERSISTED_LAST_TURNS = int(os.getenv("PERSISTED_LAST_TURNS", "6"))
 CHAT_SEMAPHORE = threading.BoundedSemaphore(MAX_CHAT_CONCURRENCY)
 
 # ✅ LLM 延迟初始化（Streamlit import 时不会立刻构建）
@@ -91,6 +103,7 @@ class ChatRequest(BaseModel):
     history: Optional[List[Dict[str, str]]] = None
     debug: bool = False
     max_turns: int = 5
+    enable_websearch: bool = True
 
 
 class ToolTrace(BaseModel):
@@ -101,9 +114,17 @@ class ToolTrace(BaseModel):
 
 class ChatResponse(BaseModel):
     session_id: str
+    message_id: str
     reply: str
+    thinking: str = ""
     history: List[Dict[str, str]]
     tool_traces: List[ToolTrace]
+
+
+class FeedbackRequest(BaseModel):
+    session_id: str
+    message_id: str
+    feedback: Literal["like", "dislike", "cancel"]
 
 
 class RegisterRequest(BaseModel):
@@ -151,6 +172,134 @@ def _require_user(authorization: Optional[str]) -> Dict[str, Any]:
 
 
 # -------------------------
+# Chat payload helpers
+# -------------------------
+
+def _sanitize_message_dict(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    role = item.get("role")
+    if role not in {"user", "assistant", "system"}:
+        return None
+    content = item.get("content", "") or ""
+    if role == "assistant":
+        visible, _ = split_visible_and_thinking(content)
+        return {"role": role, "content": visible}
+    return {"role": role, "content": content}
+
+
+def _sanitize_history_dicts(items: Optional[List[Dict[str, Any]]]) -> List[Dict[str, str]]:
+    sanitized: List[Dict[str, str]] = []
+    for item in items or []:
+        normalized = _sanitize_message_dict(item)
+        if normalized is not None:
+            sanitized.append(normalized)
+    return sanitized
+
+
+def _filter_dialogue_history(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    return [item for item in items if item.get("role") in {"user", "assistant"}]
+
+
+def _normalize_client_history(
+    client_history: Optional[List[Dict[str, Any]]],
+    current_message: str,
+) -> List[Dict[str, str]]:
+    sanitized = _sanitize_history_dicts(client_history)
+    current = (current_message or "").strip()
+    if (
+        sanitized
+        and current
+        and sanitized[-1].get("role") == "user"
+        and (sanitized[-1].get("content", "") or "").strip() == current
+    ):
+        sanitized = sanitized[:-1]
+    return sanitized
+
+
+def _history_char_count(items: List[Dict[str, str]]) -> int:
+    return sum(len(item.get("content", "") or "") for item in items)
+
+
+def _choose_history_context(
+    session_snapshot: Dict[str, Any],
+    client_history: Optional[List[Dict[str, Any]]],
+    current_message: str,
+) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], str]:
+    summary = session_snapshot.get("summary", "") or ""
+    stored_history = _filter_dialogue_history(_sanitize_history_dicts(session_snapshot.get("history", [])))
+    stored_last_turns = _filter_dialogue_history(_sanitize_history_dicts(session_snapshot.get("last_turns", [])))
+    normalized_client = _filter_dialogue_history(_normalize_client_history(client_history, current_message))
+
+    authoritative_history = stored_history
+    if normalized_client and len(normalized_client) >= len(authoritative_history):
+        authoritative_history = normalized_client
+    if not authoritative_history:
+        authoritative_history = stored_last_turns
+
+    if (
+        authoritative_history
+        and len(authoritative_history) <= MAX_RUNTIME_HISTORY_MESSAGES
+        and _history_char_count(authoritative_history) <= MAX_RUNTIME_HISTORY_CHARS
+    ):
+        return authoritative_history, authoritative_history, summary
+
+    runtime_history = stored_last_turns or authoritative_history[-PERSISTED_LAST_TURNS:]
+    if summary:
+        runtime_history = [{"role": "system", "content": f"对话摘要：{summary}"}] + runtime_history
+    return runtime_history, authoritative_history, summary
+
+
+def _finalize_history(raw_history: List[Dict[str, Any]]) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+    dialogue = _filter_dialogue_history(_sanitize_history_dicts(raw_history))
+    return dialogue, dialogue[-PERSISTED_LAST_TURNS:]
+
+
+def _persist_chat_async(
+    *,
+    prev_summary: str,
+    user_msg: str,
+    assistant_msg: str,
+    user_id: str,
+    session_id: str,
+    full_history: List[Dict[str, str]],
+    last_turns: List[Dict[str, str]],
+    state: Dict[str, Any],
+    traces: List[Dict[str, Any]],
+) -> None:
+    def _persist():
+        new_summary = _update_summary(prev_summary, user_msg, assistant_msg)
+        update_session(
+            user_id,
+            session_id,
+            new_summary,
+            last_turns,
+            state or {},
+            history=full_history,
+        )
+        append_log(user_id, "request")
+        record_interaction_metric(user_id, session_id, state or {}, traces or [], len(assistant_msg or ""))
+        update_proficiency_from_metric(user_id, state or {})
+
+    threading.Thread(target=_persist, daemon=True).start()
+
+
+def load_user_session_cache(*, token: str) -> Dict[str, Any]:
+    user = _require_user_by_token(token)
+    snapshots = list_user_session_snapshots(user["id"])
+    sessions: Dict[str, Dict[str, Any]] = {}
+    for snapshot in snapshots:
+        history = _filter_dialogue_history(
+            _sanitize_history_dicts(snapshot.get("history") or snapshot.get("last_turns") or [])
+        )
+        sessions[snapshot["session_id"]] = {
+            "messages": history,
+            "summary": snapshot.get("summary", "") or "",
+            "state": snapshot.get("state", {}) or {},
+            "updated_at": snapshot.get("updated_at"),
+        }
+    return {"sessions": sessions}
+
+
+# -------------------------
 # Core logic (shared by API & Streamlit)
 # -------------------------
 
@@ -172,35 +321,47 @@ def _update_summary(prev_summary: str, user_msg: str, assistant_msg: str) -> str
 def _handle_chat(req: ChatRequest, user: Dict[str, Any]) -> ChatResponse:
     user_id = user["id"]
     session_id = req.session_id or f"s_{uuid4().hex[:10]}"
+    message_id = f"m_{uuid4().hex[:12]}"
 
     session_snapshot = get_session(user_id, session_id)
-    history_dicts = req.history if req.history is not None else session_snapshot.get("last_turns", [])
-    summary = session_snapshot.get("summary", "")
-    if summary:
-        history_dicts = [{"role": "system", "content": f"对话摘要：{summary}"}] + history_dicts
-
+    history_dicts, _authoritative_history, summary = _choose_history_context(
+        session_snapshot,
+        req.history,
+        req.message,
+    )
     history_msgs = dicts_to_messages(history_dicts)
     state_dict = session_snapshot.get("state", None)
 
-    reply, new_history_msgs, tool_traces, new_state = query(
+    raw_reply, new_history_msgs, tool_traces, new_state = query(
         req.message,
         history=history_msgs,
         max_turns=req.max_turns,
         debug=req.debug,
         state=state_dict,
+        user_id=user_id,
+        enable_websearch=req.enable_websearch,
     )
 
-    new_history_dicts = messages_to_dicts(new_history_msgs)
-    filtered = [m for m in new_history_dicts if m.get("role") in {"user", "assistant"}]
-    last_turns = filtered[-6:]
-    summary = _update_summary(summary, req.message, reply)
-    update_session(user_id, session_id, summary, last_turns, new_state or {})
-    append_log(user_id, "request")
+    visible_reply, thinking = split_visible_and_thinking(raw_reply)
+    full_history, last_turns = _finalize_history(messages_to_dicts(new_history_msgs))
+    _persist_chat_async(
+        prev_summary=summary,
+        user_msg=req.message,
+        assistant_msg=visible_reply,
+        user_id=user_id,
+        session_id=session_id,
+        full_history=full_history,
+        last_turns=last_turns,
+        state=new_state or {},
+        traces=tool_traces,
+    )
 
     return ChatResponse(
         session_id=session_id,
-        reply=reply,
-        history=new_history_dicts,
+        message_id=message_id,
+        reply=visible_reply,
+        thinking=thinking,
+        history=full_history,
         tool_traces=[ToolTrace(**t) for t in tool_traces],
     )
 
@@ -214,6 +375,7 @@ def chat_once(
     history: Optional[List[Dict[str, str]]] = None,
     debug: bool = False,
     max_turns: int = 5,
+    enable_websearch: bool = True,
 ) -> Dict[str, Any]:
     """
     Streamlit 直接调用：
@@ -229,11 +391,115 @@ def chat_once(
             history=history,
             debug=debug,
             max_turns=max_turns,
+            enable_websearch=enable_websearch,
         )
         resp = _handle_chat(req, user)
         return resp.dict()
     finally:
         _release_chat_slot()
+
+
+def chat_once_stream(
+    *,
+    token: str,
+    message: str,
+    session_id: Optional[str] = None,
+    history: Optional[List[Dict[str, str]]] = None,
+    debug: bool = False,
+    max_turns: int = 5,
+    enable_websearch: bool = True,
+):
+    """
+    Streamlit 直接调用的流式版本。yield 字典：
+      {"type": "meta", "session_id": ..., "message_id": ...}
+      {"type": "token", "content": "..."}
+      {"type": "done", ...}
+    """
+    user = _require_user_by_token(token)
+    user_id = user["id"]
+    _acquire_chat_slot()
+
+    try:
+        sid = session_id or f"s_{uuid4().hex[:10]}"
+        message_id = f"m_{uuid4().hex[:12]}"
+
+        session_snapshot = get_session(user_id, sid)
+        history_dicts, _authoritative_history, summary = _choose_history_context(
+            session_snapshot,
+            history,
+            message,
+        )
+        history_msgs = dicts_to_messages(history_dicts)
+        state_dict = session_snapshot.get("state", None)
+
+        yield {"type": "meta", "session_id": sid, "message_id": message_id}
+
+        final_result = ""
+        final_history = history_msgs
+        final_tool_traces: List[Dict[str, Any]] = []
+        final_state = state_dict or {}
+
+        for event in query_stream(
+            message,
+            history=history_msgs,
+            max_turns=max_turns,
+            debug=debug,
+            state=state_dict,
+            user_id=user_id,
+            enable_websearch=enable_websearch,
+        ):
+            if event["type"] == "token":
+                yield {"type": "token", "content": event["content"]}
+            elif event["type"] == "done":
+                final_result = event["result"]
+                final_history = event["history"]
+                final_tool_traces = event["tool_traces"]
+                final_state = event["state"]
+
+        visible_reply, thinking = split_visible_and_thinking(final_result)
+        full_history, last_turns = _finalize_history(messages_to_dicts(final_history))
+        _persist_chat_async(
+            prev_summary=summary,
+            user_msg=message,
+            assistant_msg=visible_reply,
+            user_id=user_id,
+            session_id=sid,
+            full_history=full_history,
+            last_turns=last_turns,
+            state=final_state or {},
+            traces=final_tool_traces,
+        )
+
+        yield {
+            "type": "done",
+            "session_id": sid,
+            "message_id": message_id,
+            "reply": visible_reply,
+            "thinking": thinking,
+            "history": full_history,
+            "tool_traces": final_tool_traces,
+        }
+    finally:
+        _release_chat_slot()
+
+
+def submit_feedback(*, token: str, session_id: str, message_id: str, feedback: str) -> Dict[str, Any]:
+    user = _require_user_by_token(token)
+    user_id = user["id"]
+    if feedback in {"like", "dislike"}:
+        upsert_message_feedback(user_id, session_id, message_id, feedback)
+        append_log(user_id, "feedback", f"{feedback}:{session_id}:{message_id}")
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "message_id": message_id,
+            "feedback": get_message_feedback(user_id, session_id, message_id),
+        }
+    if feedback == "cancel":
+        delete_message_feedback(user_id, session_id, message_id)
+        append_log(user_id, "feedback", f"cancel:{session_id}:{message_id}")
+        return {"ok": True, "session_id": session_id, "message_id": message_id, "feedback": None}
+    raise HTTPException(status_code=400, detail="invalid feedback")
 
 
 def register_user(req: RegisterRequest) -> Dict[str, Any]:
@@ -298,16 +564,42 @@ def _chunk_text(text: str, size: int) -> Iterable[str]:
 # FastAPI app factory (optional)
 # -------------------------
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="Networking Lab Agent API")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    from agentic_rag.rag import _ensure_rag_initialized
+    # 开发模式（RAG_DEV_FAST_START=1）：后台线程预热，服务器立即可访问，首次请求可能有冷启动
+    # 生产模式（默认）：await 阻塞直到 RAG 完全就绪，uvicorn 在此期间不接受任何连接
+    dev_fast = os.getenv("RAG_DEV_FAST_START", "0").lower() in {"1", "true", "yes"}
+    if dev_fast:
+        threading.Thread(target=_ensure_rag_initialized, daemon=True, name="rag-warmup").start()
+    else:
+        await asyncio.to_thread(_ensure_rag_initialized)
+    yield
 
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Networking Lab Agent API", lifespan=_lifespan)
+
+    _cors_origins = os.getenv("CORS_ALLOWED_ORIGINS", "*").split(",")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=_cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}
+
+    @app.get("/health/ready")
+    def health_ready():
+        """RAG 模型完全加载后才返回 200，供生产启动脚本轮询。"""
+        from agentic_rag.rag import _initialized
+        if _initialized:
+            return {"status": "ready"}
+        raise HTTPException(status_code=503, detail="initializing")
 
     @app.post("/api/register", response_model=AuthResponse)
     def register(req: RegisterRequest):
@@ -333,45 +625,90 @@ def create_app() -> FastAPI:
         finally:
             _release_chat_slot()
 
+    @app.post("/api/feedback")
+    def feedback(req: FeedbackRequest, authorization: Optional[str] = Header(None)):
+        user = _require_user(authorization)
+        user_id = user["id"]
+        if req.feedback in {"like", "dislike"}:
+            upsert_message_feedback(user_id, req.session_id, req.message_id, req.feedback)
+            append_log(user_id, "feedback", f"{req.feedback}:{req.session_id}:{req.message_id}")
+            value = get_message_feedback(user_id, req.session_id, req.message_id)
+            return {"ok": True, "session_id": req.session_id, "message_id": req.message_id, "feedback": value}
+        if req.feedback == "cancel":
+            delete_message_feedback(user_id, req.session_id, req.message_id)
+            append_log(user_id, "feedback", f"cancel:{req.session_id}:{req.message_id}")
+            return {"ok": True, "session_id": req.session_id, "message_id": req.message_id, "feedback": None}
+        raise HTTPException(status_code=400, detail="invalid feedback")
+
     @app.post("/api/chat/stream")
     def chat_stream(req: ChatRequest, authorization: Optional[str] = Header(None)):
         user = _require_user(authorization)
+        user_id = user["id"]
         _acquire_chat_slot()
 
         def event_stream():
-            result_queue: queue.Queue = queue.Queue(maxsize=1)
-
-            def _worker():
-                try:
-                    response = _handle_chat(req, user)
-                    result_queue.put(("ok", response))
-                except Exception as exc:
-                    result_queue.put(("error", str(exc)))
-
-            worker = threading.Thread(target=_worker, daemon=True)
-            worker.start()
-
-            last_ping = time.monotonic()
             try:
-                while True:
-                    try:
-                        status, payload = result_queue.get_nowait()
-                        if status == "error":
-                            yield _sse_event("error", {"detail": payload})
-                            yield _sse_event("done", {"ok": False})
-                            return
-                        response: ChatResponse = payload
-                        reply = response.reply or ""
-                        for chunk in _chunk_text(reply, CHAT_STREAM_CHUNK_SIZE):
-                            yield _sse_event("delta", {"content": chunk})
-                        yield _sse_event("done", response.dict())
-                        return
-                    except queue.Empty:
-                        now = time.monotonic()
-                        if now - last_ping >= CHAT_STREAM_PING_INTERVAL:
-                            yield _sse_event("ping", {"ts": time.time()})
-                            last_ping = now
-                        time.sleep(0.05)
+                sid = req.session_id or f"s_{uuid4().hex[:10]}"
+                message_id = f"m_{uuid4().hex[:12]}"
+
+                session_snapshot = get_session(user_id, sid)
+                history_dicts, _authoritative_history, summary = _choose_history_context(
+                    session_snapshot,
+                    req.history,
+                    req.message,
+                )
+                history_msgs = dicts_to_messages(history_dicts)
+                state_dict = session_snapshot.get("state", None)
+
+                yield _sse_event("meta", {"session_id": sid, "message_id": message_id})
+
+                final_result = ""
+                final_history = history_msgs
+                final_tool_traces: list = []
+                final_state = state_dict or {}
+
+                for event in query_stream(
+                    req.message,
+                    history=history_msgs,
+                    max_turns=req.max_turns,
+                    debug=req.debug,
+                    state=state_dict,
+                    user_id=user_id,
+                    enable_websearch=req.enable_websearch,
+                ):
+                    if event["type"] == "token":
+                        yield _sse_event("delta", {"content": event["content"]})
+                    elif event["type"] == "done":
+                        final_result = event["result"]
+                        final_history = event["history"]
+                        final_tool_traces = event["tool_traces"]
+                        final_state = event["state"]
+
+                visible_reply, thinking = split_visible_and_thinking(final_result)
+                full_history, last_turns = _finalize_history(messages_to_dicts(final_history))
+                _persist_chat_async(
+                    prev_summary=summary,
+                    user_msg=req.message,
+                    assistant_msg=visible_reply,
+                    user_id=user_id,
+                    session_id=sid,
+                    full_history=full_history,
+                    last_turns=last_turns,
+                    state=final_state or {},
+                    traces=final_tool_traces,
+                )
+
+                yield _sse_event("done", {
+                    "session_id": sid,
+                    "message_id": message_id,
+                    "reply": visible_reply,
+                    "thinking": thinking,
+                    "history": full_history,
+                    "tool_traces": [{"tool": t["tool"], "input": t["input"], "output": t["output"]} for t in final_tool_traces],
+                })
+            except Exception as exc:
+                yield _sse_event("error", {"detail": str(exc)})
+                yield _sse_event("done", {"ok": False})
             finally:
                 _release_chat_slot()
 
@@ -404,8 +741,10 @@ def create_app() -> FastAPI:
         return {
             "session_id": session_id,
             "summary": snapshot.get("summary", ""),
+            "history": snapshot.get("history", []),
             "last_turns": snapshot.get("last_turns", []),
             "state": snapshot.get("state", {}),
+            "updated_at": snapshot.get("updated_at"),
         }
 
     return app
