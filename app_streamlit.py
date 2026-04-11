@@ -806,6 +806,18 @@ if raw_input:
                         placeholder.empty()
                     assistant_text = final_reply or ""
 
+            if assistant_thinking:
+                with st.expander("Thinking", expanded=False):
+                    st.markdown(assistant_thinking)
+
+            if st.session_state.debug and tool_traces:
+                with st.expander("工具调用详情", expanded=False):
+                    for t in tool_traces:
+                        st.markdown(f"**Tool**: {t.get('tool')}")
+                        st.code(t.get("input", ""))
+                        st.text_area("output", t.get("output", ""), height=150)
+                        st.divider()
+
     except Exception as e:
         err_text = f"生成失败：{repr(e)}"
         sess["messages"].append({"role": "assistant", "content": err_text})
@@ -834,16 +846,5 @@ if raw_input:
     })
     _touch_session(active_id)
     _persist_current_user_sessions()
-
-    # 额外展示（避免上面的 streaming placeholder 被 rerun 覆盖）
-    with st.chat_message("assistant"):
-        _render_assistant_content(assistant_text, thinking=assistant_thinking)
-        if st.session_state.debug and tool_traces:
-            with st.expander("工具调用详情", expanded=False):
-                for t in tool_traces:
-                    st.markdown(f"**Tool**: {t.get('tool')}")
-                    st.code(t.get("input", ""))
-                    st.text_area("output", t.get("output", ""), height=150)
-                    st.divider()
 
     st.rerun()

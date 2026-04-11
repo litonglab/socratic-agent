@@ -77,13 +77,16 @@ topo_store/
 topo_store_lab13/
 
 # 评测输出
-eval/results/
-eval/retrieval/results/
-eval/figures/
+eval/
 
+# 测试文件
+test_examples/
 # IDE 私有规则
 .cursor/rules/AI.mdc
 
 # 本地论文草稿
 论文/
 刘保莉专硕毕业论文初稿_版本V4.pdf
+
+# 非必要文件
+docs/

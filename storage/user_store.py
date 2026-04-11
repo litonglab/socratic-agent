@@ -539,7 +539,7 @@ def update_session(
     history: Optional[list] = None,
     title: Optional[str] = None,
     archived: Optional[bool] = None,
-) -> None:
+) -> str:
     conn = _connect()
     try:
         row = conn.execute(
@@ -550,6 +550,7 @@ def update_session(
         resolved_archived = 1 if bool(archived if archived is not None else (row["archived"] if row else 0)) else 0
         stored_history = _copy_session_messages(history or [])
         stored_last_turns = _copy_session_messages(last_turns or [])
+        updated_at = _utc_now()
         conn.execute(
             """
             INSERT INTO sessions (user_id, session_id, title, archived, summary, history_json, last_turns_json, state_json, updated_at)
@@ -572,10 +573,44 @@ def update_session(
                 json.dumps(stored_history, ensure_ascii=False),
                 json.dumps(stored_last_turns, ensure_ascii=False),
                 json.dumps(state or {}, ensure_ascii=False),
-                _utc_now(),
+                updated_at,
             ),
         )
         conn.commit()
+        return updated_at
+    finally:
+        conn.close()
+
+
+def update_session_summary(
+    user_id: str,
+    session_id: str,
+    summary: str,
+    *,
+    expected_updated_at: Optional[str] = None,
+) -> bool:
+    conn = _connect()
+    try:
+        if expected_updated_at is None:
+            cur = conn.execute(
+                """
+                UPDATE sessions
+                SET summary = ?
+                WHERE user_id = ? AND session_id = ?
+                """,
+                (summary or "", user_id, session_id),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE sessions
+                SET summary = ?
+                WHERE user_id = ? AND session_id = ? AND updated_at = ?
+                """,
+                (summary or "", user_id, session_id, expected_updated_at),
+            )
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 

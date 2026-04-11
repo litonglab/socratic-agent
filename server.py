@@ -6,7 +6,7 @@ import json
 import os
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import List, Optional, Dict, Any, Iterable, Tuple, Literal
 from uuid import uuid4
 from datetime import datetime, timezone
@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from langchain_core.messages import SystemMessage, HumanMessage
 
 # import your agent entrypoints
-from agentic_rag.agent import query, query_stream, dicts_to_messages
+from agentic_rag.agent import query, query_stream, dicts_to_messages, messages_to_dicts
 from agentic_rag.chat_format import split_visible_and_thinking
 from agentic_rag.llm_config import build_chat_llm
 from storage.auth import validate_password, validate_username, hash_password
@@ -34,6 +34,7 @@ from storage.user_store import (
     get_session,
     find_session,
     update_session,
+    update_session_summary,
     delete_session as delete_user_session,
     delete_all_sessions as delete_all_user_sessions,
     list_user_sessions,
@@ -71,6 +72,12 @@ CHAT_SEMAPHORE = threading.BoundedSemaphore(MAX_CHAT_CONCURRENCY)
 # ✅ LLM 延迟初始化（Streamlit import 时不会立刻构建）
 _SUMMARY_LLM = None
 _SUMMARY_LLM_LOCK = threading.Lock()
+_SESSION_LOCKS: Dict[Tuple[str, str], threading.Lock] = {}
+_SESSION_LOCKS_GUARD = threading.Lock()
+_LEGACY_SESSION_USER_ID = "__legacy__"
+_LEGACY_SESSIONS: Dict[str, List[Dict[str, str]]] = {}
+_LEGACY_SESSION_STATES: Dict[str, Dict[str, Any]] = {}
+_LEGACY_STORE_LOCK = threading.Lock()
 
 
 def get_summary_llm():
@@ -93,6 +100,27 @@ def _release_chat_slot() -> None:
         CHAT_SEMAPHORE.release()
     except ValueError:
         pass
+
+
+def _get_session_lock(user_id: str, session_id: str) -> threading.Lock:
+    key = (user_id, session_id)
+    with _SESSION_LOCKS_GUARD:
+        lock = _SESSION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _SESSION_LOCKS[key] = lock
+        return lock
+
+
+@contextmanager
+def _hold_session_lock(user_id: str, session_id: str):
+    # 同一会话的读取、生成与落盘需要串行，避免旧快照覆盖新状态。
+    lock = _get_session_lock(user_id, session_id)
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 # -------------------------
@@ -170,6 +198,15 @@ def _require_user_by_token(token: str) -> Dict[str, Any]:
 
 def _require_user(authorization: Optional[str]) -> Dict[str, Any]:
     token = _extract_bearer_token(authorization)
+    return _require_user_by_token(token or "")
+
+
+def _resolve_optional_user(authorization: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not authorization:
+        return None
+    token = _extract_bearer_token(authorization)
+    if token is None:
+        raise HTTPException(status_code=401, detail="unauthorized")
     return _require_user_by_token(token or "")
 
 
@@ -335,8 +372,8 @@ def _persist_session_snapshot(
     state: Dict[str, Any],
     title: str,
     archived: bool,
-) -> None:
-    update_session(
+) -> str:
+    return update_session(
         user_id,
         session_id,
         summary or "",
@@ -350,35 +387,39 @@ def _persist_session_snapshot(
 
 def _persist_chat_async(
     *,
-    prev_summary: str,
-    user_msg: str,
     assistant_msg: str,
     user_id: str,
     session_id: str,
-    full_history: List[Dict[str, Any]],
-    last_turns: List[Dict[str, Any]],
     state: Dict[str, Any],
     traces: List[Dict[str, Any]],
-    title: str,
-    archived: bool,
 ) -> None:
     def _persist():
-        new_summary = _update_summary(prev_summary, user_msg, assistant_msg)
-        update_session(
-            user_id,
-            session_id,
-            new_summary,
-            last_turns,
-            state or {},
-            history=full_history,
-            title=title or "新会话",
-            archived=archived,
-        )
         append_log(user_id, "request")
         record_interaction_metric(user_id, session_id, state or {}, traces or [], len(assistant_msg or ""))
         update_proficiency_from_metric(user_id, state or {})
 
     threading.Thread(target=_persist, daemon=True).start()
+
+
+def _persist_session_summary(
+    *,
+    prev_summary: str,
+    user_msg: str,
+    assistant_msg: str,
+    user_id: str,
+    session_id: str,
+    persisted_updated_at: Optional[str],
+) -> None:
+    try:
+        new_summary = _update_summary(prev_summary, user_msg, assistant_msg)
+        update_session_summary(
+            user_id,
+            session_id,
+            new_summary,
+            expected_updated_at=persisted_updated_at,
+        )
+    except Exception:
+        pass
 
 
 def load_user_session_cache(*, token: str) -> Dict[str, Any]:
@@ -400,10 +441,11 @@ def load_user_session_cache(*, token: str) -> Dict[str, Any]:
 
 def delete_session_for_user(*, token: str, session_id: str) -> Dict[str, Any]:
     user = _require_user_by_token(token)
-    snapshot = find_session(user["id"], session_id)
-    if snapshot is None:
-        raise HTTPException(status_code=404, detail="session not found")
-    delete_user_session(user["id"], session_id)
+    with _hold_session_lock(user["id"], session_id):
+        snapshot = find_session(user["id"], session_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        delete_user_session(user["id"], session_id)
     return {"ok": True, "session_id": session_id}
 
 
@@ -415,11 +457,12 @@ def clear_sessions_for_user(*, token: str) -> Dict[str, Any]:
 
 def set_session_archive_state(*, token: str, session_id: str, archived: bool) -> Dict[str, Any]:
     user = _require_user_by_token(token)
-    snapshot = find_session(user["id"], session_id)
-    if snapshot is None:
-        raise HTTPException(status_code=404, detail="session not found")
-    set_user_session_archived(user["id"], session_id, archived)
-    updated = find_session(user["id"], session_id)
+    with _hold_session_lock(user["id"], session_id):
+        snapshot = find_session(user["id"], session_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        set_user_session_archived(user["id"], session_id, archived)
+        updated = find_session(user["id"], session_id)
     return {
         "ok": True,
         "session_id": session_id,
@@ -447,73 +490,172 @@ def _update_summary(prev_summary: str, user_msg: str, assistant_msg: str) -> str
         return fallback[:400]
 
 
+def _load_legacy_history(session_id: str, client_history: Optional[List[Dict[str, Any]]]) -> List[Dict[str, str]]:
+    if client_history is not None:
+        return _sanitize_history_dicts(client_history)
+    with _LEGACY_STORE_LOCK:
+        return copy.deepcopy(_LEGACY_SESSIONS.get(session_id, []))
+
+
+def _load_legacy_state(session_id: str) -> Dict[str, Any]:
+    with _LEGACY_STORE_LOCK:
+        return copy.deepcopy(_LEGACY_SESSION_STATES.get(session_id, {}))
+
+
+def _persist_legacy_session(session_id: str, history: List[Dict[str, str]], state: Dict[str, Any]) -> None:
+    with _LEGACY_STORE_LOCK:
+        _LEGACY_SESSIONS[session_id] = copy.deepcopy(history)
+        _LEGACY_SESSION_STATES[session_id] = copy.deepcopy(state or {})
+
+
+def _handle_legacy_chat(req: ChatRequest) -> ChatResponse:
+    session_id = req.session_id or f"s_{uuid4().hex[:10]}"
+    with _hold_session_lock(_LEGACY_SESSION_USER_ID, session_id):
+        message_id = f"m_{uuid4().hex[:12]}"
+        history_dicts = _load_legacy_history(session_id, req.history)
+        history_msgs = dicts_to_messages(history_dicts)
+        state_dict = _load_legacy_state(session_id) or None
+
+        raw_reply, new_history_msgs, tool_traces, new_state = query(
+            req.message,
+            history=history_msgs,
+            max_turns=req.max_turns,
+            debug=req.debug,
+            state=state_dict,
+            user_id=None,
+            enable_websearch=req.enable_websearch,
+        )
+
+        visible_reply, thinking = split_visible_and_thinking(raw_reply)
+        response_history = _sanitize_history_dicts(messages_to_dicts(new_history_msgs))
+        _persist_legacy_session(session_id, response_history, new_state or {})
+
+        return ChatResponse(
+            session_id=session_id,
+            message_id=message_id,
+            reply=visible_reply,
+            thinking=thinking,
+            history=response_history,
+            tool_traces=[ToolTrace(**t) for t in tool_traces],
+        )
+
+
+def _legacy_chat_stream_events(req: ChatRequest):
+    session_id = req.session_id or f"s_{uuid4().hex[:10]}"
+    with _hold_session_lock(_LEGACY_SESSION_USER_ID, session_id):
+        message_id = f"m_{uuid4().hex[:12]}"
+        history_dicts = _load_legacy_history(session_id, req.history)
+        history_msgs = dicts_to_messages(history_dicts)
+        state_dict = _load_legacy_state(session_id) or None
+
+        yield _sse_event("meta", {"session_id": session_id, "message_id": message_id})
+
+        final_result = ""
+        final_history = history_msgs
+        final_tool_traces: List[Dict[str, Any]] = []
+        final_state = state_dict or {}
+
+        for event in query_stream(
+            req.message,
+            history=history_msgs,
+            max_turns=req.max_turns,
+            debug=req.debug,
+            state=state_dict,
+            user_id=None,
+            enable_websearch=req.enable_websearch,
+        ):
+            if event["type"] == "token":
+                yield _sse_event("delta", {"content": event["content"]})
+            elif event["type"] == "done":
+                final_result = event["result"]
+                final_history = event["history"]
+                final_tool_traces = event["tool_traces"]
+                final_state = event["state"]
+
+        visible_reply, thinking = split_visible_and_thinking(final_result)
+        response_history = _sanitize_history_dicts(messages_to_dicts(final_history))
+        _persist_legacy_session(session_id, response_history, final_state or {})
+
+        yield _sse_event("done", {
+            "session_id": session_id,
+            "message_id": message_id,
+            "reply": visible_reply,
+            "thinking": thinking,
+            "history": response_history,
+            "tool_traces": [{"tool": t["tool"], "input": t["input"], "output": t["output"]} for t in final_tool_traces],
+        })
+
+
 def _handle_chat(req: ChatRequest, user: Dict[str, Any]) -> ChatResponse:
     user_id = user["id"]
     session_id = req.session_id or f"s_{uuid4().hex[:10]}"
-    message_id = f"m_{uuid4().hex[:12]}"
+    with _hold_session_lock(user_id, session_id):
+        message_id = f"m_{uuid4().hex[:12]}"
 
-    session_snapshot = get_session(user_id, session_id)
-    history_dicts, _authoritative_history, summary = _choose_history_context(
-        session_snapshot,
-        req.history,
-        req.message,
-    )
-    history_msgs = dicts_to_messages(history_dicts)
-    state_dict = session_snapshot.get("state", None)
+        session_snapshot = get_session(user_id, session_id)
+        history_dicts, _authoritative_history, summary = _choose_history_context(
+            session_snapshot,
+            req.history,
+            req.message,
+        )
+        history_msgs = dicts_to_messages(history_dicts)
+        state_dict = session_snapshot.get("state", None)
 
-    raw_reply, new_history_msgs, tool_traces, new_state = query(
-        req.message,
-        history=history_msgs,
-        max_turns=req.max_turns,
-        debug=req.debug,
-        state=state_dict,
-        user_id=user_id,
-        enable_websearch=req.enable_websearch,
-    )
+        raw_reply, _new_history_msgs, tool_traces, new_state = query(
+            req.message,
+            history=history_msgs,
+            max_turns=req.max_turns,
+            debug=req.debug,
+            state=state_dict,
+            user_id=user_id,
+            enable_websearch=req.enable_websearch,
+        )
 
-    visible_reply, thinking = split_visible_and_thinking(raw_reply)
-    full_history, last_turns, session_title, session_archived = _build_session_history_records(
-        session_snapshot,
-        req.history,
-        req.message,
-        visible_reply,
-        thinking,
-        message_id,
-        tool_traces,
-    )
-    response_history, _ = _finalize_history(full_history)
-    _persist_session_snapshot(
-        summary=summary,
-        user_id=user_id,
-        session_id=session_id,
-        full_history=full_history,
-        last_turns=last_turns,
-        state=new_state or {},
-        title=session_title,
-        archived=session_archived,
-    )
-    _persist_chat_async(
-        prev_summary=summary,
-        user_msg=req.message,
-        assistant_msg=visible_reply,
-        user_id=user_id,
-        session_id=session_id,
-        full_history=full_history,
-        last_turns=last_turns,
-        state=new_state or {},
-        traces=tool_traces,
-        title=session_title,
-        archived=session_archived,
-    )
+        visible_reply, thinking = split_visible_and_thinking(raw_reply)
+        full_history, last_turns, session_title, session_archived = _build_session_history_records(
+            session_snapshot,
+            req.history,
+            req.message,
+            visible_reply,
+            thinking,
+            message_id,
+            tool_traces,
+        )
+        response_history, _ = _finalize_history(full_history)
+        persisted_updated_at = _persist_session_snapshot(
+            summary=summary,
+            user_id=user_id,
+            session_id=session_id,
+            full_history=full_history,
+            last_turns=last_turns,
+            state=new_state or {},
+            title=session_title,
+            archived=session_archived,
+        )
+        _persist_session_summary(
+            prev_summary=summary,
+            user_msg=req.message,
+            assistant_msg=visible_reply,
+            user_id=user_id,
+            session_id=session_id,
+            persisted_updated_at=persisted_updated_at,
+        )
+        _persist_chat_async(
+            assistant_msg=visible_reply,
+            user_id=user_id,
+            session_id=session_id,
+            state=new_state or {},
+            traces=tool_traces,
+        )
 
-    return ChatResponse(
-        session_id=session_id,
-        message_id=message_id,
-        reply=visible_reply,
-        thinking=thinking,
-        history=response_history,
-        tool_traces=[ToolTrace(**t) for t in tool_traces],
-    )
+        return ChatResponse(
+            session_id=session_id,
+            message_id=message_id,
+            reply=visible_reply,
+            thinking=thinking,
+            history=response_history,
+            tool_traces=[ToolTrace(**t) for t in tool_traces],
+        )
 
 
 # ✅ 给 Streamlit 调用的“纯函数入口”（不走 HTTP）
@@ -571,85 +713,85 @@ def chat_once_stream(
 
     try:
         sid = session_id or f"s_{uuid4().hex[:10]}"
-        message_id = f"m_{uuid4().hex[:12]}"
+        with _hold_session_lock(user_id, sid):
+            message_id = f"m_{uuid4().hex[:12]}"
 
-        session_snapshot = get_session(user_id, sid)
-        history_dicts, _authoritative_history, summary = _choose_history_context(
-            session_snapshot,
-            history,
-            message,
-        )
-        history_msgs = dicts_to_messages(history_dicts)
-        state_dict = session_snapshot.get("state", None)
+            session_snapshot = get_session(user_id, sid)
+            history_dicts, _authoritative_history, summary = _choose_history_context(
+                session_snapshot,
+                history,
+                message,
+            )
+            history_msgs = dicts_to_messages(history_dicts)
+            state_dict = session_snapshot.get("state", None)
 
-        yield {"type": "meta", "session_id": sid, "message_id": message_id}
+            yield {"type": "meta", "session_id": sid, "message_id": message_id}
 
-        final_result = ""
-        final_history = history_msgs
-        final_tool_traces: List[Dict[str, Any]] = []
-        final_state = state_dict or {}
+            final_result = ""
+            final_tool_traces: List[Dict[str, Any]] = []
+            final_state = state_dict or {}
 
-        for event in query_stream(
-            message,
-            history=history_msgs,
-            max_turns=max_turns,
-            debug=debug,
-            state=state_dict,
-            user_id=user_id,
-            enable_websearch=enable_websearch,
-        ):
-            if event["type"] == "token":
-                yield {"type": "token", "content": event["content"]}
-            elif event["type"] == "done":
-                final_result = event["result"]
-                final_history = event["history"]
-                final_tool_traces = event["tool_traces"]
-                final_state = event["state"]
+            for event in query_stream(
+                message,
+                history=history_msgs,
+                max_turns=max_turns,
+                debug=debug,
+                state=state_dict,
+                user_id=user_id,
+                enable_websearch=enable_websearch,
+            ):
+                if event["type"] == "token":
+                    yield {"type": "token", "content": event["content"]}
+                elif event["type"] == "done":
+                    final_result = event["result"]
+                    final_tool_traces = event["tool_traces"]
+                    final_state = event["state"]
 
-        visible_reply, thinking = split_visible_and_thinking(final_result)
-        full_history, last_turns, session_title, session_archived = _build_session_history_records(
-            session_snapshot,
-            history,
-            message,
-            visible_reply,
-            thinking,
-            message_id,
-            final_tool_traces,
-        )
-        response_history, _ = _finalize_history(full_history)
-        _persist_session_snapshot(
-            summary=summary,
-            user_id=user_id,
-            session_id=sid,
-            full_history=full_history,
-            last_turns=last_turns,
-            state=final_state or {},
-            title=session_title,
-            archived=session_archived,
-        )
-        _persist_chat_async(
-            prev_summary=summary,
-            user_msg=message,
-            assistant_msg=visible_reply,
-            user_id=user_id,
-            session_id=sid,
-            full_history=full_history,
-            last_turns=last_turns,
-            state=final_state or {},
-            traces=final_tool_traces,
-            title=session_title,
-            archived=session_archived,
-        )
-
-        yield {
-            "type": "done",
-            "session_id": sid,
-            "message_id": message_id,
-            "reply": visible_reply,
-            "thinking": thinking,
-            "history": response_history,
-            "tool_traces": final_tool_traces,
-        }
+            visible_reply, thinking = split_visible_and_thinking(final_result)
+            full_history, last_turns, session_title, session_archived = _build_session_history_records(
+                session_snapshot,
+                history,
+                message,
+                visible_reply,
+                thinking,
+                message_id,
+                final_tool_traces,
+            )
+            response_history, _ = _finalize_history(full_history)
+            persisted_updated_at = _persist_session_snapshot(
+                summary=summary,
+                user_id=user_id,
+                session_id=sid,
+                full_history=full_history,
+                last_turns=last_turns,
+                state=final_state or {},
+                title=session_title,
+                archived=session_archived,
+            )
+            yield {
+                "type": "done",
+                "session_id": sid,
+                "message_id": message_id,
+                "reply": visible_reply,
+                "thinking": thinking,
+                "history": response_history,
+                "tool_traces": final_tool_traces,
+            }
+            _persist_session_summary(
+                prev_summary=summary,
+                user_msg=message,
+                assistant_msg=visible_reply,
+                user_id=user_id,
+                session_id=sid,
+                persisted_updated_at=persisted_updated_at,
+            )
+            _persist_chat_async(
+                assistant_msg=visible_reply,
+                user_id=user_id,
+                session_id=sid,
+                state=final_state or {},
+                traces=final_tool_traces,
+            )
     finally:
         _release_chat_slot()
 
@@ -789,9 +931,11 @@ def create_app() -> FastAPI:
 
     @app.post("/api/chat", response_model=ChatResponse)
     def chat(req: ChatRequest, authorization: Optional[str] = Header(None)):
-        user = _require_user(authorization)
+        user = _resolve_optional_user(authorization)
         _acquire_chat_slot()
         try:
+            if user is None:
+                return _handle_legacy_chat(req)
             return _handle_chat(req, user)
         finally:
             _release_chat_slot()
@@ -813,91 +957,94 @@ def create_app() -> FastAPI:
 
     @app.post("/api/chat/stream")
     def chat_stream(req: ChatRequest, authorization: Optional[str] = Header(None)):
-        user = _require_user(authorization)
-        user_id = user["id"]
+        user = _resolve_optional_user(authorization)
         _acquire_chat_slot()
 
         def event_stream():
             try:
+                if user is None:
+                    yield from _legacy_chat_stream_events(req)
+                    return
+                user_id = user["id"]
                 sid = req.session_id or f"s_{uuid4().hex[:10]}"
-                message_id = f"m_{uuid4().hex[:12]}"
+                with _hold_session_lock(user_id, sid):
+                    message_id = f"m_{uuid4().hex[:12]}"
 
-                session_snapshot = get_session(user_id, sid)
-                history_dicts, _authoritative_history, summary = _choose_history_context(
-                    session_snapshot,
-                    req.history,
-                    req.message,
-                )
-                history_msgs = dicts_to_messages(history_dicts)
-                state_dict = session_snapshot.get("state", None)
+                    session_snapshot = get_session(user_id, sid)
+                    history_dicts, _authoritative_history, summary = _choose_history_context(
+                        session_snapshot,
+                        req.history,
+                        req.message,
+                    )
+                    history_msgs = dicts_to_messages(history_dicts)
+                    state_dict = session_snapshot.get("state", None)
 
-                yield _sse_event("meta", {"session_id": sid, "message_id": message_id})
+                    yield _sse_event("meta", {"session_id": sid, "message_id": message_id})
 
-                final_result = ""
-                final_history = history_msgs
-                final_tool_traces: list = []
-                final_state = state_dict or {}
+                    final_result = ""
+                    final_tool_traces: list = []
+                    final_state = state_dict or {}
 
-                for event in query_stream(
-                    req.message,
-                    history=history_msgs,
-                    max_turns=req.max_turns,
-                    debug=req.debug,
-                    state=state_dict,
-                    user_id=user_id,
-                    enable_websearch=req.enable_websearch,
-                ):
-                    if event["type"] == "token":
-                        yield _sse_event("delta", {"content": event["content"]})
-                    elif event["type"] == "done":
-                        final_result = event["result"]
-                        final_history = event["history"]
-                        final_tool_traces = event["tool_traces"]
-                        final_state = event["state"]
+                    for event in query_stream(
+                        req.message,
+                        history=history_msgs,
+                        max_turns=req.max_turns,
+                        debug=req.debug,
+                        state=state_dict,
+                        user_id=user_id,
+                        enable_websearch=req.enable_websearch,
+                    ):
+                        if event["type"] == "token":
+                            yield _sse_event("delta", {"content": event["content"]})
+                        elif event["type"] == "done":
+                            final_result = event["result"]
+                            final_tool_traces = event["tool_traces"]
+                            final_state = event["state"]
 
-                visible_reply, thinking = split_visible_and_thinking(final_result)
-                full_history, last_turns, session_title, session_archived = _build_session_history_records(
-                    session_snapshot,
-                    req.history,
-                    req.message,
-                    visible_reply,
-                    thinking,
-                    message_id,
-                    final_tool_traces,
-                )
-                response_history, _ = _finalize_history(full_history)
-                _persist_session_snapshot(
-                    summary=summary,
-                    user_id=user_id,
-                    session_id=sid,
-                    full_history=full_history,
-                    last_turns=last_turns,
-                    state=final_state or {},
-                    title=session_title,
-                    archived=session_archived,
-                )
-                _persist_chat_async(
-                    prev_summary=summary,
-                    user_msg=req.message,
-                    assistant_msg=visible_reply,
-                    user_id=user_id,
-                    session_id=sid,
-                    full_history=full_history,
-                    last_turns=last_turns,
-                    state=final_state or {},
-                    traces=final_tool_traces,
-                    title=session_title,
-                    archived=session_archived,
-                )
-
-                yield _sse_event("done", {
-                    "session_id": sid,
-                    "message_id": message_id,
-                    "reply": visible_reply,
-                    "thinking": thinking,
-                    "history": response_history,
-                    "tool_traces": [{"tool": t["tool"], "input": t["input"], "output": t["output"]} for t in final_tool_traces],
-                })
+                    visible_reply, thinking = split_visible_and_thinking(final_result)
+                    full_history, last_turns, session_title, session_archived = _build_session_history_records(
+                        session_snapshot,
+                        req.history,
+                        req.message,
+                        visible_reply,
+                        thinking,
+                        message_id,
+                        final_tool_traces,
+                    )
+                    response_history, _ = _finalize_history(full_history)
+                    persisted_updated_at = _persist_session_snapshot(
+                        summary=summary,
+                        user_id=user_id,
+                        session_id=sid,
+                        full_history=full_history,
+                        last_turns=last_turns,
+                        state=final_state or {},
+                        title=session_title,
+                        archived=session_archived,
+                    )
+                    yield _sse_event("done", {
+                        "session_id": sid,
+                        "message_id": message_id,
+                        "reply": visible_reply,
+                        "thinking": thinking,
+                        "history": response_history,
+                        "tool_traces": [{"tool": t["tool"], "input": t["input"], "output": t["output"]} for t in final_tool_traces],
+                    })
+                    _persist_session_summary(
+                        prev_summary=summary,
+                        user_msg=req.message,
+                        assistant_msg=visible_reply,
+                        user_id=user_id,
+                        session_id=sid,
+                        persisted_updated_at=persisted_updated_at,
+                    )
+                    _persist_chat_async(
+                        assistant_msg=visible_reply,
+                        user_id=user_id,
+                        session_id=sid,
+                        state=final_state or {},
+                        traces=final_tool_traces,
+                    )
             except Exception as exc:
                 yield _sse_event("error", {"detail": str(exc)})
                 yield _sse_event("done", {"ok": False})
@@ -912,22 +1059,40 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/sessions/{session_id}")
     def delete_session(session_id: str, authorization: Optional[str] = Header(None)):
-        user = _require_user(authorization)
-        user_id = user["id"]
-        delete_user_session(user_id, session_id)
+        user = _resolve_optional_user(authorization)
+        if user is None:
+            with _hold_session_lock(_LEGACY_SESSION_USER_ID, session_id):
+                with _LEGACY_STORE_LOCK:
+                    _LEGACY_SESSIONS.pop(session_id, None)
+                    _LEGACY_SESSION_STATES.pop(session_id, None)
+            return {"ok": True}
+        with _hold_session_lock(user["id"], session_id):
+            delete_user_session(user["id"], session_id)
         return {"ok": True}
 
     @app.get("/api/sessions")
     def list_sessions(authorization: Optional[str] = Header(None)):
-        user = _require_user(authorization)
-        user_id = user["id"]
-        return {"sessions": list_user_sessions(user_id)}
+        user = _resolve_optional_user(authorization)
+        if user is None:
+            with _LEGACY_STORE_LOCK:
+                return {"sessions": list(_LEGACY_SESSIONS.keys())}
+        return {"sessions": list_user_sessions(user["id"])}
 
     @app.get("/api/sessions/{session_id}")
     def get_session_detail(session_id: str, authorization: Optional[str] = Header(None)):
-        user = _require_user(authorization)
-        user_id = user["id"]
-        snapshot = find_session(user_id, session_id)
+        user = _resolve_optional_user(authorization)
+        if user is None:
+            with _LEGACY_STORE_LOCK:
+                history = copy.deepcopy(_LEGACY_SESSIONS.get(session_id))
+                state = copy.deepcopy(_LEGACY_SESSION_STATES.get(session_id, {}))
+            if history is None:
+                raise HTTPException(status_code=404, detail="session not found")
+            return {
+                "session_id": session_id,
+                "history": history,
+                "state": state,
+            }
+        snapshot = find_session(user["id"], session_id)
         if snapshot is None:
             raise HTTPException(status_code=404, detail="session not found")
         return {
