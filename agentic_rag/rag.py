@@ -5,17 +5,14 @@ import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.document_loaders import Docx2txtLoader
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
-
-from agentic_rag.llm_config import build_chat_llm
 
 # -------------------------
 # 路径与环境配置（廉价，保持模块级）
@@ -36,7 +33,6 @@ DISABLE_RERANKER = os.getenv("DISABLE_RERANKER", "0").lower() in {"1", "true", "
 # -------------------------
 # 延迟初始化状态（首次查询时才真正加载）
 # -------------------------
-_llm = None
 _loaded_vectorstore = None
 _loaded_chunks = None
 _cross_encoder = None
@@ -63,17 +59,6 @@ _RETRIEVAL_PARAMS: dict = {
     "CALCULATION":         {"low": (20, 3), "high": (20, 4)},
 }
 _DEFAULT_RETRIEVAL = (30, 4)
-
-# 创建带有 system 消息的模板
-prompt_template = ChatPromptTemplate.from_messages([
-    ("system", """你是网络实验排错助教。你必须仅依据"已知信息"回答，不得编造。
-回答中的每个关键结论句末尾必须用引用编号标注来源，格式为 [n]，n 来自已知信息块的编号。
-如果已知信息不足以支持结论，回答"无法从已知信息确定"。
-
-已知信息:
-{context} """),
-    ("user", "{question}")
-])
 
 
 # -------------------------
@@ -266,7 +251,7 @@ def _build_hybrid_retriever(bm25_k: int, dense_k: int, fusion_k: int):
 
 def _ensure_rag_initialized():
     """首次调用时执行完整的 RAG 初始化流程（线程安全）。"""
-    global _llm, _loaded_vectorstore, _loaded_chunks, _cross_encoder, _initialized
+    global _loaded_vectorstore, _loaded_chunks, _cross_encoder, _initialized
 
     if _initialized:
         return
@@ -277,24 +262,21 @@ def _ensure_rag_initialized():
 
         print("[RAG] 开始初始化...")
 
-        # 1. LLM
-        _llm = build_chat_llm(temperature=0)
-
-        # 2. 嵌入模型
+        # 1. 嵌入模型
         print(f"[RAG] 加载 Embedding 模型：{EMBEDDING_MODEL_NAME} ...")
         embeddings = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL_NAME,
             encode_kwargs={"normalize_embeddings": True},
         )
 
-        # 3. 优先复用 index 对应的 chunks，确保 BM25 与 Dense 使用同一套文档块
+        # 2. 优先复用 index 对应的 chunks，确保 BM25 与 Dense 使用同一套文档块
         chunks = None
         if not REBUILD_INDEX and Path(INDEX_DIR).exists():
             chunks = _load_chunks_from_index(Path(INDEX_DIR))
             if chunks:
                 print(f"[RAG] 从 {INDEX_DIR / 'chunks.pkl'} 加载运行时 chunks，共 {len(chunks)} 个")
 
-        # 4. 如果需要，再从 docx 重新切分并构建索引
+        # 3. 如果需要，再从 docx 重新切分并构建索引
         if chunks is None:
             docx_files = sorted(DATA_DIR.glob("*.docx"))
             if not docx_files:
@@ -315,7 +297,7 @@ def _ensure_rag_initialized():
 
         _loaded_chunks = chunks
 
-        # 5. 构建或加载 FAISS
+        # 4. 构建或加载 FAISS
         if REBUILD_INDEX or not Path(INDEX_DIR).exists():
             print("[RAG] 正在构建 FAISS 索引...")
             vectorstore = FAISS.from_documents(chunks, embeddings)
@@ -332,7 +314,7 @@ def _ensure_rag_initialized():
         )
         print("[RAG] FAISS 索引加载完成")
 
-        # 6. Reranker
+        # 5. Reranker
         if not DISABLE_RERANKER:
             print(f"[RAG] 加载 Reranker 模型：{RERANKER_MODEL_NAME} ...")
             _cross_encoder = HuggingFaceCrossEncoder(model_name=RERANKER_MODEL_NAME)
@@ -346,7 +328,7 @@ def _ensure_rag_initialized():
 
 
 # -------------------------
-# 检索与生成
+# 检索
 # -------------------------
 
 def _get_adaptive_retriever(category: Optional[str] = None, hint_level: int = 0):
@@ -407,44 +389,71 @@ def build_numbered_context(docs, citations):
     return "\n\n".join(parts)
 
 
-def _ensure_inline_citations(answer: str, default_id: int = 1) -> str:
-    if re.search(r"\[\d+\]", answer or ""):
-        return answer
-    if not answer:
-        return answer
-    answer = re.sub(r"([。！？!?])", r"\1" + f" [{default_id}]", answer)
-    if f"[{default_id}]" not in answer:
-        answer = answer.rstrip() + f" [{default_id}]"
-    return answer
+def retrieve_course_docs(
+    query: str,
+    category: Optional[str] = None,
+    hint_level: int = 0,
+    max_sources: int = 6,
+) -> Dict[str, Any]:
+    """纯检索接口，返回原始证据上下文与引用元数据，不做 LLM 整理。"""
+    normalized_query = (query or "").strip()
+    if not normalized_query:
+        return {"ok": False, "error": "query is required"}
+
+    try:
+        normalized_hint_level = max(0, int(hint_level))
+    except (TypeError, ValueError):
+        normalized_hint_level = 0
+
+    try:
+        normalized_max_sources = max(1, int(max_sources))
+    except (TypeError, ValueError):
+        normalized_max_sources = 6
+
+    try:
+        _ensure_rag_initialized()
+
+        active_retriever = _get_adaptive_retriever(category, normalized_hint_level)
+        try:
+            docs = active_retriever.invoke(normalized_query)
+        except Exception:
+            docs = active_retriever.get_relevant_documents(normalized_query)
+
+        citations = build_citations(docs, max_sources=normalized_max_sources)
+        context_docs = docs[: len(citations)]
+        context = build_numbered_context(context_docs, citations) if citations else ""
+
+        return {
+            "ok": True,
+            "query": normalized_query,
+            "category": category,
+            "hint_level": normalized_hint_level,
+            "source_count": len(citations),
+            "citations": citations,
+            "context": context,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "query": normalized_query,
+            "category": category,
+            "hint_level": normalized_hint_level,
+            "error": f"retrieve_course_docs failed: {exc}",
+        }
 
 
 def RAGAgent(message, category: Optional[str] = None, hint_level: int = 0):
     """
+    兼容旧名称：当前返回纯检索结果，不再做 LLM 整理。
+
     category: 问题分类（THEORY_CONCEPT / LAB_TROUBLESHOOTING / CONFIG_REVIEW / CALCULATION）
     hint_level: 0-3，影响检索广度和返回数量
     """
-    _ensure_rag_initialized()
-
-    active_retriever = _get_adaptive_retriever(category, hint_level)
-    try:
-        docs = active_retriever.invoke(message)
-    except Exception:
-        docs = active_retriever.get_relevant_documents(message)
-
-    citations = build_citations(docs)
-    context = build_numbered_context(docs, citations)
-
-    messages = prompt_template.format_messages(context=context, question=message)
-    resp = _llm.invoke(messages)
-    answer = getattr(resp, "content", str(resp))
-    if citations:
-        answer = _ensure_inline_citations(answer, default_id=citations[0]["id"])
-
-    if citations:
-        footer = "\n".join([f"[{c['id']}] {c['source']}" for c in citations])
-        answer = answer.rstrip() + "\n\n引用：\n" + footer
-
-    return {"answer": answer, "citations": citations}
+    return retrieve_course_docs(
+        query=message,
+        category=category,
+        hint_level=hint_level,
+    )
 
 
 if __name__ == "__main__":

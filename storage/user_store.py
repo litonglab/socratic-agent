@@ -70,6 +70,8 @@ def _init_db() -> None:
                 CREATE TABLE IF NOT EXISTS sessions (
                     user_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '新会话',
+                    archived INTEGER NOT NULL DEFAULT 0,
                     summary TEXT NOT NULL,
                     history_json TEXT NOT NULL DEFAULT '[]',
                     last_turns_json TEXT NOT NULL,
@@ -126,12 +128,26 @@ def _init_db() -> None:
                 );
                 """
             )
+            _ensure_column(conn, "sessions", "title", "title TEXT NOT NULL DEFAULT '新会话'")
+            _ensure_column(conn, "sessions", "archived", "archived INTEGER NOT NULL DEFAULT 0")
             _ensure_column(conn, "sessions", "history_json", "history_json TEXT NOT NULL DEFAULT '[]'")
             conn.execute(
                 """
                 UPDATE sessions
                 SET history_json = COALESCE(NULLIF(last_turns_json, ''), '[]')
                 WHERE history_json IS NULL OR history_json = '' OR history_json = '[]'
+                """
+            )
+            conn.execute(
+                """
+                UPDATE sessions
+                SET title = COALESCE(NULLIF(title, ''), '新会话')
+                """
+            )
+            conn.execute(
+                """
+                UPDATE sessions
+                SET archived = COALESCE(archived, 0)
                 """
             )
             conn.commit()
@@ -166,6 +182,59 @@ def _read_json(path: Path, default: Any) -> Any:
             return json.load(f)
     except Exception:
         return default
+
+
+def _copy_session_messages(messages: Any) -> list:
+    normalized = []
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        copied = dict(item)
+        copied.pop("image_b64", None)
+        normalized.append(copied)
+    return normalized
+
+
+def _get_feedback_map(conn: sqlite3.Connection, user_id: str, session_id: str) -> Dict[str, str]:
+    rows = conn.execute(
+        """
+        SELECT message_id, feedback_type
+        FROM message_feedback
+        WHERE user_id = ? AND session_id = ?
+        """,
+        (user_id, session_id),
+    ).fetchall()
+    return {row["message_id"]: row["feedback_type"] for row in rows}
+
+
+def _apply_feedback(messages: Any, feedback_map: Dict[str, str]) -> list:
+    normalized = []
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        copied = dict(item)
+        message_id = copied.get("message_id")
+        if message_id:
+            copied["feedback"] = feedback_map.get(message_id)
+        normalized.append(copied)
+    return normalized
+
+
+def _row_to_session_dict(conn: sqlite3.Connection, user_id: str, row: sqlite3.Row) -> Dict[str, Any]:
+    session_id = row["session_id"]
+    feedback_map = _get_feedback_map(conn, user_id, session_id)
+    history = _apply_feedback(json.loads(row["history_json"] or "[]"), feedback_map)
+    last_turns = _apply_feedback(json.loads(row["last_turns_json"] or "[]"), feedback_map)
+    return {
+        "session_id": session_id,
+        "title": row["title"] or "新会话",
+        "archived": bool(row["archived"]),
+        "summary": row["summary"] or "",
+        "history": history,
+        "last_turns": last_turns,
+        "state": json.loads(row["state_json"] or "{}"),
+        "updated_at": row["updated_at"],
+    }
 
 
 def _migrate_users(conn: sqlite3.Connection) -> None:
@@ -207,19 +276,22 @@ def _migrate_sessions(conn: sqlite3.Connection) -> None:
         if not isinstance(sessions, dict):
             continue
         for session_id, sess in sessions.items():
-            full_history = sess.get("messages") or sess.get("history") or sess.get("last_turns", [])
+            full_history = _copy_session_messages(sess.get("messages") or sess.get("history") or sess.get("last_turns", []))
+            last_turns = _copy_session_messages(sess.get("last_turns", []))
             conn.execute(
                 """
                 INSERT OR REPLACE INTO sessions
-                (user_id, session_id, summary, history_json, last_turns_json, state_json, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (user_id, session_id, title, archived, summary, history_json, last_turns_json, state_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
                     session_id,
+                    sess.get("title") or "新会话",
+                    1 if sess.get("archived") else 0,
                     sess.get("summary", ""),
                     json.dumps(full_history, ensure_ascii=False),
-                    json.dumps(sess.get("last_turns", []), ensure_ascii=False),
+                    json.dumps(last_turns, ensure_ascii=False),
                     json.dumps(sess.get("state", {}), ensure_ascii=False),
                     _utc_now(),
                 ),
@@ -418,21 +490,24 @@ def get_session(user_id: str, session_id: str) -> Dict[str, Any]:
     try:
         row = conn.execute(
             """
-            SELECT summary, history_json, last_turns_json, state_json, updated_at
+            SELECT session_id, title, archived, summary, history_json, last_turns_json, state_json, updated_at
             FROM sessions
             WHERE user_id = ? AND session_id = ?
             """,
             (user_id, session_id),
         ).fetchone()
         if not row:
-            return {"summary": "", "history": [], "last_turns": [], "state": {}, "updated_at": None}
-        return {
-            "summary": row["summary"] or "",
-            "history": json.loads(row["history_json"] or "[]"),
-            "last_turns": json.loads(row["last_turns_json"] or "[]"),
-            "state": json.loads(row["state_json"] or "{}"),
-            "updated_at": row["updated_at"],
-        }
+            return {
+                "session_id": session_id,
+                "title": "新会话",
+                "archived": False,
+                "summary": "",
+                "history": [],
+                "last_turns": [],
+                "state": {},
+                "updated_at": None,
+            }
+        return _row_to_session_dict(conn, user_id, row)
     finally:
         conn.close()
 
@@ -442,7 +517,7 @@ def find_session(user_id: str, session_id: str) -> Optional[Dict[str, Any]]:
     try:
         row = conn.execute(
             """
-            SELECT summary, history_json, last_turns_json, state_json, updated_at
+            SELECT session_id, title, archived, summary, history_json, last_turns_json, state_json, updated_at
             FROM sessions
             WHERE user_id = ? AND session_id = ?
             """,
@@ -450,13 +525,7 @@ def find_session(user_id: str, session_id: str) -> Optional[Dict[str, Any]]:
         ).fetchone()
         if not row:
             return None
-        return {
-            "summary": row["summary"] or "",
-            "history": json.loads(row["history_json"] or "[]"),
-            "last_turns": json.loads(row["last_turns_json"] or "[]"),
-            "state": json.loads(row["state_json"] or "{}"),
-            "updated_at": row["updated_at"],
-        }
+        return _row_to_session_dict(conn, user_id, row)
     finally:
         conn.close()
 
@@ -468,14 +537,26 @@ def update_session(
     last_turns: list,
     state: dict,
     history: Optional[list] = None,
+    title: Optional[str] = None,
+    archived: Optional[bool] = None,
 ) -> None:
     conn = _connect()
     try:
+        row = conn.execute(
+            "SELECT title, archived FROM sessions WHERE user_id = ? AND session_id = ?",
+            (user_id, session_id),
+        ).fetchone()
+        resolved_title = title if title is not None else ((row["title"] or "新会话") if row else "新会话")
+        resolved_archived = 1 if bool(archived if archived is not None else (row["archived"] if row else 0)) else 0
+        stored_history = _copy_session_messages(history or [])
+        stored_last_turns = _copy_session_messages(last_turns or [])
         conn.execute(
             """
-            INSERT INTO sessions (user_id, session_id, summary, history_json, last_turns_json, state_json, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sessions (user_id, session_id, title, archived, summary, history_json, last_turns_json, state_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id, session_id) DO UPDATE SET
+                title=excluded.title,
+                archived=excluded.archived,
                 summary=excluded.summary,
                 history_json=excluded.history_json,
                 last_turns_json=excluded.last_turns_json,
@@ -485,9 +566,11 @@ def update_session(
             (
                 user_id,
                 session_id,
+                resolved_title,
+                resolved_archived,
                 summary or "",
-                json.dumps(history or [], ensure_ascii=False),
-                json.dumps(last_turns or [], ensure_ascii=False),
+                json.dumps(stored_history, ensure_ascii=False),
+                json.dumps(stored_last_turns, ensure_ascii=False),
                 json.dumps(state or {}, ensure_ascii=False),
                 _utc_now(),
             ),
@@ -500,6 +583,14 @@ def update_session(
 def delete_session(user_id: str, session_id: str) -> None:
     conn = _connect()
     try:
+        conn.execute(
+            "DELETE FROM message_feedback WHERE user_id = ? AND session_id = ?",
+            (user_id, session_id),
+        )
+        conn.execute(
+            "DELETE FROM interaction_metrics WHERE user_id = ? AND session_id = ?",
+            (user_id, session_id),
+        )
         conn.execute(
             "DELETE FROM sessions WHERE user_id = ? AND session_id = ?",
             (user_id, session_id),
@@ -526,7 +617,7 @@ def list_user_session_snapshots(user_id: str) -> list:
     try:
         cur = conn.execute(
             """
-            SELECT session_id, summary, history_json, last_turns_json, state_json, updated_at
+            SELECT session_id, title, archived, summary, history_json, last_turns_json, state_json, updated_at
             FROM sessions
             WHERE user_id = ?
             ORDER BY updated_at DESC
@@ -535,19 +626,35 @@ def list_user_session_snapshots(user_id: str) -> list:
         )
         snapshots = []
         for row in cur.fetchall():
-            history = json.loads(row["history_json"] or "[]")
-            last_turns = json.loads(row["last_turns_json"] or "[]")
-            snapshots.append(
-                {
-                    "session_id": row["session_id"],
-                    "summary": row["summary"] or "",
-                    "history": history,
-                    "last_turns": last_turns,
-                    "state": json.loads(row["state_json"] or "{}"),
-                    "updated_at": row["updated_at"],
-                }
-            )
+            snapshots.append(_row_to_session_dict(conn, user_id, row))
         return snapshots
+    finally:
+        conn.close()
+
+
+def set_session_archived(user_id: str, session_id: str, archived: bool) -> None:
+    conn = _connect()
+    try:
+        conn.execute(
+            """
+            UPDATE sessions
+            SET archived = ?, updated_at = ?
+            WHERE user_id = ? AND session_id = ?
+            """,
+            (1 if archived else 0, _utc_now(), user_id, session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_all_sessions(user_id: str) -> None:
+    conn = _connect()
+    try:
+        conn.execute("DELETE FROM message_feedback WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM interaction_metrics WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        conn.commit()
     finally:
         conn.close()
 

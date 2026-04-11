@@ -14,12 +14,14 @@ load_dotenv()
 
 # ✅ 直接本地调用 server.py（不走 HTTP）
 from server import (
-    chat_once,
     chat_once_stream,
+    clear_sessions_for_user,
+    delete_session_for_user,
     submit_feedback,
     register_user,
     login_user,
     load_user_session_cache,
+    set_session_archive_state,
     RegisterRequest,
     LoginRequest,
 )
@@ -28,7 +30,7 @@ from agentic_rag.vision import describe_image
 from components.chat_input_images import chat_input_images
 
 PERSIST_PATH = os.getenv("PERSIST_PATH", os.path.join(os.path.dirname(__file__), "sessions.json"))
-  # 会话持久化文件路径（可改）
+  # 仅持久化轻量 UI 状态；会话内容以后端数据库为准
 USE_PSEUDO_STREAMING = True
 PSEUDO_STREAM_DELAY = float(os.getenv("PSEUDO_STREAM_DELAY", "0.01"))
 PSEUDO_STREAM_CHUNK = int(os.getenv("PSEUDO_STREAM_CHUNK", "20"))
@@ -63,16 +65,9 @@ def _load_persisted() -> Dict[str, Any]:
 
 
 def _save_persisted():
-    import copy
-    data = copy.deepcopy(st.session_state.persisted_data)
-    # 剥离 image_b64 避免 JSON 文件膨胀
-    for _uname, udata in data.get("users", {}).items():
-        for _sid, sess in udata.get("sessions", {}).items():
-            for m in sess.get("messages", []):
-                m.pop("image_b64", None)
     try:
         with open(PERSIST_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(st.session_state.persisted_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         st.sidebar.warning(f"会话持久化写入失败：{repr(e)}")
 
@@ -81,22 +76,28 @@ def _ensure_persisted_shape() -> Dict[str, Any]:
     data = _load_persisted()
     if not isinstance(data, dict):
         return {"users": {}}
+    normalized = {"users": {}}
     if "users" in data and isinstance(data["users"], dict):
-        return data
+        for username, store in data["users"].items():
+            if not isinstance(store, dict):
+                continue
+            normalized["users"][username] = {
+                "active_session_id": store.get("active_session_id"),
+            }
+        return normalized
     if "sessions" in data:
-        return {"users": {"_legacy": {"sessions": data.get("sessions", {}), "active_session_id": data.get("active_session_id")}}}
-    return {"users": {}}
+        normalized["users"]["_legacy"] = {"active_session_id": data.get("active_session_id")}
+    return normalized
 
 
 def _get_user_store(username: str) -> Dict[str, Any]:
     data = st.session_state.persisted_data
     users = data.setdefault("users", {})
-    return users.setdefault(username, {"sessions": {}, "active_session_id": None})
+    return users.setdefault(username, {"active_session_id": None})
 
 
-def _save_user_store(username: str, sessions: Dict[str, Any], active_session_id: Optional[str]) -> None:
+def _save_user_store(username: str, active_session_id: Optional[str]) -> None:
     store = _get_user_store(username)
-    store["sessions"] = sessions
     store["active_session_id"] = active_session_id
     _save_persisted()
 
@@ -196,15 +197,18 @@ def _touch_session(session_id: str) -> None:
 
 def _load_user_sessions(username: str) -> None:
     store = _get_user_store(username)
-    local_sessions = _normalize_sessions(store.get("sessions", {}))
     backend_sessions: Dict[str, Any] = {}
     if st.session_state.get("auth_token"):
         try:
             backend_sessions = load_user_session_cache(token=st.session_state.auth_token).get("sessions", {})
         except Exception:
             backend_sessions = {}
-    st.session_state.sessions = _merge_backend_sessions(local_sessions, backend_sessions)
-    st.session_state.active_session_id = store.get("active_session_id")
+    st.session_state.sessions = _normalize_sessions(backend_sessions)
+    preferred_session_id = store.get("active_session_id")
+    if preferred_session_id in st.session_state.sessions:
+        st.session_state.active_session_id = preferred_session_id
+    else:
+        st.session_state.active_session_id = _pick_session_id(archived=False)
     _ensure_one_session()
     _save_persisted()
 
@@ -214,7 +218,6 @@ def _persist_current_user_sessions() -> None:
         return
     _save_user_store(
         st.session_state.current_user,
-        st.session_state.sessions,
         st.session_state.active_session_id,
     )
 
@@ -256,10 +259,20 @@ def _rename_key(old_key: str, new_key: str):
     _persist_current_user_sessions()
 
 
+def _is_backend_session(session_id: Optional[str]) -> bool:
+    return bool(session_id) and not str(session_id).startswith("local_")
+
+
 def _set_session_archived(session_id: str, archived: bool) -> None:
     sess = st.session_state.sessions.get(session_id)
     if not sess:
         return
+    if _is_backend_session(session_id):
+        set_session_archive_state(
+            token=st.session_state.auth_token or "",
+            session_id=session_id,
+            archived=archived,
+        )
     sess["archived"] = archived
     sess["updated_at"] = _now_ts()
     st.session_state.sessions[session_id] = sess
@@ -281,7 +294,11 @@ def _unarchive_session(session_id: str) -> None:
 
 
 def _delete_session(session_id: str):
-    # ✅ B方案：不再请求后端删除（因为没有后端 HTTP）
+    if _is_backend_session(session_id):
+        delete_session_for_user(
+            token=st.session_state.auth_token or "",
+            session_id=session_id,
+        )
     if session_id in st.session_state.sessions:
         del st.session_state.sessions[session_id]
 
@@ -293,6 +310,8 @@ def _delete_session(session_id: str):
 
 
 def _clear_all_sessions():
+    if st.session_state.auth_token:
+        clear_sessions_for_user(token=st.session_state.auth_token)
     st.session_state.sessions = {}
     st.session_state.active_session_id = None
     _ensure_one_session()
@@ -358,9 +377,6 @@ if "current_user" not in st.session_state:
 
 if "auth_token" not in st.session_state:
     st.session_state.auth_token = None
-
-if "sync_history" not in st.session_state:
-    st.session_state.sync_history = True
 
 if "debug" not in st.session_state:
     st.session_state.debug = False
@@ -458,7 +474,7 @@ if not st.session_state.current_user:
 with st.sidebar:
     st.markdown("### 用户")
     st.caption(f"当前用户：{st.session_state.current_user}")
-    st.session_state.sync_history = st.toggle("同步历史到后端（B方案下仅用于摘要/状态一致性）", value=st.session_state.sync_history)
+    st.caption("会话历史与状态以后端数据库为准")
     st.session_state.manage_mode = st.toggle("批量管理模式", value=st.session_state.get("manage_mode", False))
     if st.button("退出登录"):
         st.session_state.current_user = None
@@ -735,15 +751,6 @@ if raw_input:
 
     payload_session_id = None if active_id.startswith("local_") else active_id
 
-    history_payload = None
-    if st.session_state.sync_history:
-        previous_messages = sess.get("messages", [])[:-1]
-        history_payload = [
-            normalized
-            for normalized in (_message_for_history(message) for message in previous_messages)
-            if normalized is not None
-        ]
-
     try:
         with st.chat_message("assistant"):
             placeholder = st.empty()
@@ -760,7 +767,7 @@ if raw_input:
                 "token": st.session_state.auth_token or "",
                 "message": combined_message,
                 "session_id": payload_session_id,
-                "history": history_payload,
+                "history": None,
                 "debug": st.session_state.debug,
                 "max_turns": 5,
             }

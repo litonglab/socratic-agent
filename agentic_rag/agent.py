@@ -71,7 +71,20 @@ _IDENTITY_KEYWORDS = ["你是谁", "你是什么", "who are you", "what are you"
 _IDENTITY_REPLY = "我是计算机网络实验课 AI 助教，基于大语言模型技术，并经过课程知识库的专属优化。我可以帮你理解网络理论、排查实验故障、审查配置和辅导计算题。有什么网络问题可以问我！"
 
 action_re = re.compile(r'^工具：(\w+)：(.*)$')
+tool_calls_block_re = re.compile(r"<tool_calls>\s*(.*?)\s*</tool_calls>", re.IGNORECASE | re.DOTALL)
 _EXPERIMENT_ID_RE = re.compile(r"(?:实验\s*|lab[\s_-]?)(\d+)", re.IGNORECASE)
+_MAX_TOOL_ACTIONS_PER_TURN = 5
+
+
+@dataclass(frozen=True)
+class ToolActionMatch:
+    tool: str
+    action_input: str
+    raw: str = ""
+    source: str = "legacy"
+
+    def groups(self) -> Tuple[str, str]:
+        return self.tool, self.action_input
 
 
 class Evidence(TypedDict):
@@ -152,6 +165,118 @@ def _experiment_label(experiment_id: str) -> str:
     if match:
         return f"实验{int(match.group(1))}"
     return experiment_id
+
+
+def _strip_json_code_fence(payload: str) -> str:
+    text = (payload or "").strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if len(lines) >= 2 and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return text
+
+
+def _dedupe_tool_actions(actions: List[ToolActionMatch]) -> List[ToolActionMatch]:
+    deduped: List[ToolActionMatch] = []
+    seen = set()
+    for action in actions:
+        key = (action.tool, action.action_input)
+        if not action.tool or not action.action_input or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(action)
+        if len(deduped) >= _MAX_TOOL_ACTIONS_PER_TURN:
+            break
+    return deduped
+
+
+def _normalize_structured_tool_actions(data: Any) -> List[ToolActionMatch]:
+    if isinstance(data, dict):
+        data = data.get("tool_calls") or data.get("actions") or data.get("calls") or []
+    if not isinstance(data, list):
+        return []
+
+    actions: List[ToolActionMatch] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        tool = str(item.get("tool") or item.get("action") or item.get("name") or "").strip()
+        action_input = item.get("input", item.get("query"))
+        if isinstance(action_input, (dict, list)):
+            action_input = json.dumps(action_input, ensure_ascii=False)
+        action_input = str(action_input or "").strip()
+        if tool and action_input:
+            actions.append(
+                ToolActionMatch(
+                    tool=tool,
+                    action_input=action_input,
+                    raw=json.dumps(item, ensure_ascii=False),
+                    source="structured",
+                )
+            )
+    return _dedupe_tool_actions(actions)
+
+
+def _find_structured_actions(text: str) -> List[ToolActionMatch]:
+    for match in tool_calls_block_re.finditer(text or ""):
+        payload = _strip_json_code_fence(match.group(1))
+        try:
+            data = json.loads(payload)
+        except Exception:
+            continue
+        actions = _normalize_structured_tool_actions(data)
+        if actions:
+            return actions
+    return []
+
+
+def _find_legacy_actions(text: str, *, allow_incomplete_last_line: bool = True) -> List[ToolActionMatch]:
+    content = text or ""
+    lines = content.split("\n")
+    if not allow_incomplete_last_line and content and not content.endswith("\n"):
+        lines = lines[:-1]
+
+    actions: List[ToolActionMatch] = []
+    for line in lines:
+        stripped = line.strip()
+        match = action_re.match(stripped)
+        if not match:
+            continue
+        tool = (match.group(1) or "").strip()
+        action_input = (match.group(2) or "").strip()
+        if tool and action_input:
+            actions.append(
+                ToolActionMatch(
+                    tool=tool,
+                    action_input=action_input,
+                    raw=stripped,
+                    source="legacy",
+                )
+            )
+    return _dedupe_tool_actions(actions)
+
+
+def _find_actions(text: str) -> List[ToolActionMatch]:
+    structured = _find_structured_actions(text)
+    if structured:
+        return structured
+    return _find_legacy_actions(text)
+
+
+def _find_actions_in_stream_buffer(text: str) -> List[ToolActionMatch]:
+    structured = _find_structured_actions(text)
+    if structured:
+        return structured
+    return _find_legacy_actions(text, allow_incomplete_last_line=False)
+
+
+def _has_open_tool_calls_block(text: str) -> bool:
+    lowered = (text or "").lower()
+    start = lowered.find("<tool_calls>")
+    if start == -1:
+        return False
+    return lowered.find("</tool_calls>", start) == -1
 
 
 def _resolve_experiment_context(
@@ -457,6 +582,19 @@ def _prepare_context(
             f"如果需要调用拓扑工具，只使用该实验下审核通过的拓扑 JSON，不要混用其他实验数据。"
         )
 
+    final_prompt += (
+        "\n\n【工具调用协议】\n"
+        "如果你需要调用一个或多个工具，必须输出一个 `<tool_calls>...</tool_calls>` 代码块，"
+        "其中内容是 JSON 数组；数组元素格式固定为 "
+        '{"tool": "检索|拓扑|搜索", "input": "具体查询"}。'
+        "\n"
+        "同一轮若需要多个工具，请把多个对象按执行顺序放在同一个数组中，系统会批量执行。"
+        "\n"
+        "触发工具调用时，本轮不要输出面向学生的最终回答，等待系统返回全部工具结果后再继续。"
+        "\n"
+        "除兼容旧版本外，不要再输出 `工具：检索：...` 这种单行格式。"
+    )
+
     debug_info = None
     if debug:
         debug_info = (
@@ -505,8 +643,20 @@ def _execute_tool_action(
 
     observation = contextual_actions[action](action_input)
     if isinstance(observation, dict) and observation.get("citations"):
-        last_citations.clear()
-        last_citations.extend(observation.get("citations") or [])
+        existing = {
+            (c.get("source", "unknown"), c.get("snippet", ""))
+            for c in last_citations
+        }
+        next_id = len(last_citations) + 1
+        for citation in observation.get("citations") or []:
+            key = (citation.get("source", "unknown"), citation.get("snippet", ""))
+            if key in existing:
+                continue
+            existing.add(key)
+            merged = dict(citation)
+            merged["id"] = next_id
+            next_id += 1
+            last_citations.append(merged)
 
     obs_output_str = _coerce_to_text(observation)
     tool_traces.append({
@@ -514,16 +664,27 @@ def _execute_tool_action(
         "input": action_input,
         "output": obs_output_str[:2000],
     })
-    return f"检索结果：{obs_output_str}"
+    return f"工具：{action}：{action_input}\n检索结果：{obs_output_str}"
+
+
+def _execute_tool_actions(
+    action_matches: List[ToolActionMatch],
+    contextual_actions: Dict[str, Any],
+    tool_traces: List[Dict[str, Any]],
+    last_citations: List[Dict[str, Any]],
+) -> str:
+    """执行一批工具调用，并将全部观察结果拼接回下一轮上下文。"""
+    observations = [
+        _execute_tool_action(action_match, contextual_actions, tool_traces, last_citations)
+        for action_match in action_matches
+    ]
+    return "\n\n".join(observations)
 
 
 def _find_action(text: str):
     """从 LLM 输出中提取第一个工具调用匹配。"""
-    for line in (text or "").split("\n"):
-        m = action_re.match(line)
-        if m:
-            return m
-    return None
+    actions = _find_actions(text)
+    return actions[0] if actions else None
 
 
 # -------------------------------------------------------------------------
@@ -575,10 +736,12 @@ def query(
         if debug:
             print(f"Turn {i + 1}: {result[:50]}...")
 
-        action_match = _find_action(result)
-        if action_match:
-            next_prompt = _execute_tool_action(
-                action_match, ctx.contextual_actions, tool_traces, last_citations
+        action_matches = _find_actions(result)
+        if action_matches:
+            if debug:
+                print(f"[DEBUG] Parsed {len(action_matches)} tool actions in turn {i + 1}")
+            next_prompt = _execute_tool_actions(
+                action_matches, ctx.contextual_actions, tool_traces, last_citations
             )
             continue
 
@@ -655,22 +818,21 @@ def query_stream(
         bot.messages.append(HumanMessage(content=next_prompt))
 
         accumulated = ""
-        found_action = False
+        found_actions: List[ToolActionMatch] = []
         started_forwarding = False
 
         for token in bot.execute_stream():
             accumulated += token
 
             if not started_forwarding:
-                lines = accumulated.split("\n")
-                for line in lines[:-1]:
-                    if action_re.match(line.strip()):
-                        found_action = True
-                        break
-
-                if found_action:
+                found_actions = _find_actions_in_stream_buffer(accumulated)
+                if found_actions:
                     break
 
+                if _has_open_tool_calls_block(accumulated):
+                    continue
+
+                lines = accumulated.split("\n")
                 if len(lines) > 2 or (len(accumulated) > 80 and "\n" in accumulated):
                     started_forwarding = True
                     yield {"type": "token", "content": accumulated}
@@ -680,12 +842,18 @@ def query_stream(
         full_turn_text = getattr(bot, '_last_stream_result', accumulated)
         bot.messages.append(AIMessage(content=full_turn_text))
 
-        if found_action:
-            action_match = _find_action(full_turn_text)
-            if action_match:
-                next_prompt = _execute_tool_action(
-                    action_match, ctx.contextual_actions, tool_traces, last_citations
-                )
+        action_matches = found_actions or _find_actions(full_turn_text)
+        if action_matches:
+            if debug:
+                print(f"[DEBUG] Parsed {len(action_matches)} tool actions in streaming turn {i + 1}")
+            next_prompt = _execute_tool_actions(
+                action_matches, ctx.contextual_actions, tool_traces, last_citations
+            )
+            if not started_forwarding:
+                continue
+            else:
+                # 正常协议下，工具调用轮不应向前端暴露可见文本；若模型混出可见内容，
+                # 仍以工具执行优先，交由下一轮继续推理。
                 continue
 
         final_result = full_turn_text

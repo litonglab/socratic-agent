@@ -1,0 +1,161 @@
+{
+  "target_size": 93,
+  "target_topology_ratio": 0.4516,
+  "min_reference_len": 20,
+  "drop_uncovered": true,
+  "removed_count": 7,
+  "removed_items": [
+    {
+      "id": 9,
+      "orig_id": 16,
+      "source": "实验11-网络层协议分析（2025版）.docx",
+      "question": "在实验11（网络层协议分析）中，如何在交换机的VLAN接口上配置IP地址？请列出具体步骤。",
+      "issues": [
+        "reference_uncovered",
+        "reference_too_short"
+      ]
+    },
+    {
+      "id": 14,
+      "orig_id": 42,
+      "source": "实验13-子网划分（2025版）.docx",
+      "question": "在实验13（子网划分）中，在 SW4 上配置 VLAN 6 的 IP 地址时，使用的子网掩码位是多少？",
+      "issues": [
+        "reference_uncovered",
+        "reference_too_short"
+      ]
+    },
+    {
+      "id": 22,
+      "orig_id": 14,
+      "source": "实验11-网络层协议分析（2025版）.docx",
+      "question": "在实验11（网络层协议分析）中，假设在不同网段的ARP协议分析中，配置交换机VLAN时忘记设置VLAN接口的IP地址，会导致什么问题？",
+      "issues": [
+        "reference_uncovered",
+        "reference_too_short"
+      ]
+    },
+    {
+      "id": 41,
+      "orig_id": 40,
+      "source": "实验13-子网划分（2025版）.docx",
+      "question": "在实验13（子网划分）中，在 SW1 上，VLAN 2 的子网掩码是多少？",
+      "issues": [
+        "reference_uncovered",
+        "reference_too_short"
+      ]
+    },
+    {
+      "id": 42,
+      "orig_id": 30,
+      "source": "实验12-静态路由协议（2025版）.docx",
+      "question": "在实验12（静态路由协议）中，在未对 VLAN 端口进行任何描述配置的情况下，该 VLAN 端口的默认描述字符串是什么？",
+      "issues": [
+        "reference_uncovered",
+        "reference_too_short"
+      ]
+    },
+    {
+      "id": 46,
+      "orig_id": 17,
+      "source": "实验11-网络层协议分析（2025版）.docx",
+      "question": "在实验11（网络层协议分析）中，使用命令\"tracert -d 192.168.3.100\"时，如果目标主机不存在，ICMP报文中会出现什么类型的消息？",
+      "issues": [
+        "reference_uncovered",
+        "reference_too_short"
+      ]
+    },
+    {
+      "id": 52,
+      "orig_id": 50,
+      "source": "实验2-PC互连与对等网络 (2025版).docx",
+      "question": "在实验2（PC互连与对等网络 (2025版)）中，如果在设置 PCa 的以太网共享时，系统未自动设置 LAN 适配器的 IP 地址为 192.168.137.1，该如何手动修复这个问题？",
+      "issues": [
+        "reference_uncovered",
+        "reference_too_short"
+      ]
+    }
+  ],
+  "filled_count": 7,
+  "filled_items_sample": [
+    {
+      "orig_id": "TQ05",
+      "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json",
+      "type": "concept",
+      "requires_topology": true
+    },
+    {
+      "orig_id": 92,
+      "source": "实验8-虚拟局域网技术（2025版）.docx",
+      "type": "troubleshooting",
+      "requires_topology": false
+    },
+    {
+      "orig_id": 48,
+      "source": "实验2-PC互连与对等网络 (2025版).docx",
+      "type": "concept",
+      "requires_topology": false
+    },
+    {
+      "orig_id": 24,
+      "source": "实验12-静态路由协议（2025版）.docx",
+      "type": "config",
+      "requires_topology": false
+    },
+    {
+      "orig_id": 68,
+      "source": "实验3-网络设备基本配置（2025版）.docx",
+      "type": "concept",
+      "requires_topology": false
+    },
+    {
+      "orig_id": 62,
+      "source": "实验3-网络设备基本配置（2025版）.docx",
+      "type": "troubleshooting",
+      "requires_topology": false
+    },
+    {
+      "orig_id": "TQ21",
+      "source": "topo_store/lab13/approved_json/topo_285247f8264919a0b65a8e8d9f8bd3bf4f4a9f1a.json",
+      "type": "calculation",
+      "requires_topology": true
+    }
+  ],
+  "input_dataset": "/Users/baoliliu/Downloads/networking-agent/RAG-Agent/eval/qa_dataset_topo_balanced.json",
+  "base_dataset": "/Users/baoliliu/Downloads/networking-agent/RAG-Agent/eval/qa_dataset.json",
+  "topology_bank": "/Users/baoliliu/Downloads/networking-agent/RAG-Agent/eval/topology_question_bank.json",
+  "before": {
+    "total": 93,
+    "topology_n": 42,
+    "topology_ratio": 0.4516,
+    "type_dist": {
+      "calculation": 14,
+      "concept": 27,
+      "troubleshooting": 29,
+      "config": 23
+    },
+    "difficulty_dist": {
+      "easy": 29,
+      "medium": 53,
+      "hard": 11
+    }
+  },
+  "after": {
+    "total": 93,
+    "topology_n": 42,
+    "topology_ratio": 0.4516,
+    "type_dist": {
+      "troubleshooting": 29,
+      "config": 23,
+      "concept": 27,
+      "calculation": 14
+    },
+    "difficulty_dist": {
+      "easy": 27,
+      "hard": 11,
+      "medium": 55
+    }
+  },
+  "high_quality_candidate_topology_n": 119,
+  "high_quality_candidate_total_n": 186
+}

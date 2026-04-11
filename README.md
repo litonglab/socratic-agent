@@ -158,6 +158,49 @@ streamlit run app_streamlit.py
 - `done`：完整结束包
 - `error`：异常信息
 
+## MCP 支持
+
+项目新增了一个只读的 MCP Server，便于在 Cursor、Claude Desktop 或其他支持 MCP 的客户端中复用仓库内的稳定能力，而不影响现有 `FastAPI + Streamlit` 主链路。
+
+当前开放的工具包括：
+
+- `retrieve_course_docs`：检索课程文档，返回结构化引用与拼接后的上下文。
+- `get_topology_context`：读取实验拓扑上下文，只使用审核通过的 `approved_json`。
+- `list_available_experiments`：列出当前具备可用拓扑数据的实验编号。
+- `get_experiment_manifest`：读取指定实验的 `manifest.json`；若缺失，则退化为基于 `approved_json` 的摘要。
+
+启动方式：
+
+```bash
+python -m mcp_server.server
+```
+
+或：
+
+```bash
+bash scripts/start_mcp_server.sh
+```
+
+当前版本使用 `stdio` 传输，适合本地 IDE / Agent 客户端接入。客户端配置示例：
+
+```json
+{
+  "mcpServers": {
+    "networking-lab-agent": {
+      "command": "python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "/absolute/path/to/RAG-Agent"
+    }
+  }
+}
+```
+
+说明：
+
+- `retrieve_course_docs` 会复用项目现有的 RAG 检索栈，因此首次调用可能触发模型与索引冷启动。
+- `get_topology_context` 与 `get_experiment_manifest` 默认读取 `TOPO_STORE_ROOT` 下的数据。
+- MCP 层位于 `mcp_server/`，属于旁路接入，不会改变现有 `/api/chat` 与前端调用方式。
+
 ## 拓扑结构化数据构建
 
 当你需要把实验文档中的拓扑图转成结构化 JSON，可执行：
@@ -194,8 +237,9 @@ topo_store/
 
 ```bash
 python eval/build_balanced_qa_dataset.py \
-  --topo-ratio 0.4 \
+  --topo-ratio 0.45 \
   --target-size 93 \
+  --min-topo-per-experiment 3 \
   --output eval/qa_dataset_topo_balanced.json
 ```
 
@@ -207,6 +251,30 @@ python eval/performance_benchmark.py --dataset eval/qa_dataset_topo_balanced.jso
 python eval/judge_consistency.py --dataset eval/qa_dataset_topo_balanced.json
 python eval/topology_evaluation.py --questions-file eval/topology_question_bank.json
 ```
+
+如果你已经补齐了多个实验的 `topo_store/*/approved_json`，建议先扩充拓扑题库，再重建评测集：
+
+```bash
+python eval/expand_topology_question_bank.py \
+  --bank eval/topology_question_bank.json \
+  --output eval/topology_question_bank.json \
+  --max-new-per-topology 4
+```
+
+该脚本会跨实验自动补题（去重并延续 `TQ` 编号），随后可继续执行上面的平衡构建与评测命令。
+其中 `--min-topo-per-experiment` 用于约束每个实验在平衡集里的最低拓扑题数量，能有效避免题目过度集中在单个实验。
+
+如果你想在不重写全量题库的前提下提升评测集质量，可以再执行一次清洗补齐：
+
+```bash
+python eval/curate_qa_dataset_v2.py \
+  --seed-dataset eval/qa_dataset_topo_balanced.json \
+  --output eval/qa_dataset_topo_balanced_v2.json \
+  --report eval/qa_dataset_topo_balanced_v2_report.json \
+  --min-reference-len 20
+```
+
+说明：`--min-reference-len` 越高，题目可判分性越好，但可用拓扑题上限会下降；可结合报告里的 `high_quality_candidate_topology_n` 调整阈值。
 
 ## 目录结构（核心部分）
 
@@ -220,9 +288,10 @@ RAG-Agent/
 │   ├── llm_config.py
 │   ├── vision.py
 │   └── web_search.py
+├── mcp_server/                 # MCP 服务层，暴露只读工具
 ├── components/                # Streamlit 自定义输入组件
 ├── storage/                   # 用户、会话、反馈、画像等存储逻辑
-├── scripts/                   # 启动与部署脚本
+├── scripts/                   # 启动与部署脚本（含 MCP 启动脚本）
 ├── eval/                      # 评测与对比实验脚本
 ├── data/                      # 课程 docx 原始数据
 ├── faiss_index/               # 向量索引

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
-import queue
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from langchain_core.messages import SystemMessage, HumanMessage
 
 # import your agent entrypoints
-from agentic_rag.agent import query, query_stream, dicts_to_messages, messages_to_dicts
+from agentic_rag.agent import query, query_stream, dicts_to_messages
 from agentic_rag.chat_format import split_visible_and_thinking
 from agentic_rag.llm_config import build_chat_llm
 from storage.auth import validate_password, validate_username, hash_password
@@ -35,8 +35,10 @@ from storage.user_store import (
     find_session,
     update_session,
     delete_session as delete_user_session,
+    delete_all_sessions as delete_all_user_sessions,
     list_user_sessions,
     list_user_session_snapshots,
+    set_session_archived as set_user_session_archived,
     append_log,
     upsert_message_feedback,
     delete_message_feedback,
@@ -219,6 +221,78 @@ def _history_char_count(items: List[Dict[str, str]]) -> int:
     return sum(len(item.get("content", "") or "") for item in items)
 
 
+def _default_session_title(text: str, max_len: int = 12) -> str:
+    content = (text or "").strip().replace("\n", " ")
+    if len(content) <= max_len:
+        return content or "新会话"
+    return content[:max_len].rstrip() + "…"
+
+
+def _session_title_from_messages(messages: List[Dict[str, Any]], fallback: str = "新会话") -> str:
+    for item in messages or []:
+        if item.get("role") == "user":
+            title = _default_session_title(item.get("content", ""))
+            if title:
+                return title
+    return fallback
+
+
+def _copy_message_for_storage(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(item, dict):
+        return None
+    copied = copy.deepcopy(item)
+    copied.pop("image_b64", None)
+    if copied.get("role") == "assistant":
+        visible, _ = split_visible_and_thinking(copied.get("content", "") or "")
+        copied["content"] = visible
+        traces = copied.get("tool_traces") or []
+        copied["tool_traces"] = [dict(trace) for trace in traces if isinstance(trace, dict)]
+    return copied
+
+
+def _normalize_message_records(items: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for item in items or []:
+        copied = _copy_message_for_storage(item)
+        if copied is not None:
+            normalized.append(copied)
+    return normalized
+
+
+def _build_session_history_records(
+    session_snapshot: Dict[str, Any],
+    client_history: Optional[List[Dict[str, Any]]],
+    current_message: str,
+    assistant_message: str,
+    thinking: str,
+    message_id: str,
+    tool_traces: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str, bool]:
+    stored_history = _normalize_message_records(session_snapshot.get("history", []))
+    if stored_history:
+        base_messages = stored_history
+    else:
+        base_messages = _normalize_message_records(_normalize_client_history(client_history, current_message))
+
+    full_messages = list(base_messages)
+    full_messages.append({"role": "user", "content": current_message})
+    full_messages.append({
+        "role": "assistant",
+        "content": assistant_message,
+        "thinking": thinking or "",
+        "tool_traces": [dict(trace) for trace in tool_traces or [] if isinstance(trace, dict)],
+        "message_id": message_id,
+        "feedback": None,
+    })
+    title = session_snapshot.get("title") or _session_title_from_messages(full_messages, "新会话")
+    if title in {"", "新会话"}:
+        title = _session_title_from_messages(full_messages, "新会话")
+    dialogue_messages = [msg for msg in full_messages if msg.get("role") in {"user", "assistant"}]
+    last_turns = dialogue_messages[-PERSISTED_LAST_TURNS:]
+    archived = bool(session_snapshot.get("archived", False))
+    return full_messages, last_turns, title, archived
+
+
 def _choose_history_context(
     session_snapshot: Dict[str, Any],
     client_history: Optional[List[Dict[str, Any]]],
@@ -229,11 +303,9 @@ def _choose_history_context(
     stored_last_turns = _filter_dialogue_history(_sanitize_history_dicts(session_snapshot.get("last_turns", [])))
     normalized_client = _filter_dialogue_history(_normalize_client_history(client_history, current_message))
 
-    authoritative_history = stored_history
-    if normalized_client and len(normalized_client) >= len(authoritative_history):
-        authoritative_history = normalized_client
+    authoritative_history = stored_history or stored_last_turns
     if not authoritative_history:
-        authoritative_history = stored_last_turns
+        authoritative_history = normalized_client
 
     if (
         authoritative_history
@@ -253,6 +325,29 @@ def _finalize_history(raw_history: List[Dict[str, Any]]) -> Tuple[List[Dict[str,
     return dialogue, dialogue[-PERSISTED_LAST_TURNS:]
 
 
+def _persist_session_snapshot(
+    *,
+    summary: str,
+    user_id: str,
+    session_id: str,
+    full_history: List[Dict[str, Any]],
+    last_turns: List[Dict[str, Any]],
+    state: Dict[str, Any],
+    title: str,
+    archived: bool,
+) -> None:
+    update_session(
+        user_id,
+        session_id,
+        summary or "",
+        last_turns,
+        state or {},
+        history=full_history,
+        title=title or "新会话",
+        archived=archived,
+    )
+
+
 def _persist_chat_async(
     *,
     prev_summary: str,
@@ -260,10 +355,12 @@ def _persist_chat_async(
     assistant_msg: str,
     user_id: str,
     session_id: str,
-    full_history: List[Dict[str, str]],
-    last_turns: List[Dict[str, str]],
+    full_history: List[Dict[str, Any]],
+    last_turns: List[Dict[str, Any]],
     state: Dict[str, Any],
     traces: List[Dict[str, Any]],
+    title: str,
+    archived: bool,
 ) -> None:
     def _persist():
         new_summary = _update_summary(prev_summary, user_msg, assistant_msg)
@@ -274,6 +371,8 @@ def _persist_chat_async(
             last_turns,
             state or {},
             history=full_history,
+            title=title or "新会话",
+            archived=archived,
         )
         append_log(user_id, "request")
         record_interaction_metric(user_id, session_id, state or {}, traces or [], len(assistant_msg or ""))
@@ -287,16 +386,46 @@ def load_user_session_cache(*, token: str) -> Dict[str, Any]:
     snapshots = list_user_session_snapshots(user["id"])
     sessions: Dict[str, Dict[str, Any]] = {}
     for snapshot in snapshots:
-        history = _filter_dialogue_history(
-            _sanitize_history_dicts(snapshot.get("history") or snapshot.get("last_turns") or [])
-        )
+        history = _normalize_message_records(snapshot.get("history") or snapshot.get("last_turns") or [])
         sessions[snapshot["session_id"]] = {
+            "title": snapshot.get("title") or _session_title_from_messages(history, snapshot["session_id"]),
             "messages": history,
+            "archived": bool(snapshot.get("archived", False)),
             "summary": snapshot.get("summary", "") or "",
             "state": snapshot.get("state", {}) or {},
             "updated_at": snapshot.get("updated_at"),
         }
     return {"sessions": sessions}
+
+
+def delete_session_for_user(*, token: str, session_id: str) -> Dict[str, Any]:
+    user = _require_user_by_token(token)
+    snapshot = find_session(user["id"], session_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    delete_user_session(user["id"], session_id)
+    return {"ok": True, "session_id": session_id}
+
+
+def clear_sessions_for_user(*, token: str) -> Dict[str, Any]:
+    user = _require_user_by_token(token)
+    delete_all_user_sessions(user["id"])
+    return {"ok": True}
+
+
+def set_session_archive_state(*, token: str, session_id: str, archived: bool) -> Dict[str, Any]:
+    user = _require_user_by_token(token)
+    snapshot = find_session(user["id"], session_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    set_user_session_archived(user["id"], session_id, archived)
+    updated = find_session(user["id"], session_id)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "archived": bool(updated.get("archived", archived)) if updated else archived,
+        "updated_at": updated.get("updated_at") if updated else None,
+    }
 
 
 # -------------------------
@@ -343,7 +472,26 @@ def _handle_chat(req: ChatRequest, user: Dict[str, Any]) -> ChatResponse:
     )
 
     visible_reply, thinking = split_visible_and_thinking(raw_reply)
-    full_history, last_turns = _finalize_history(messages_to_dicts(new_history_msgs))
+    full_history, last_turns, session_title, session_archived = _build_session_history_records(
+        session_snapshot,
+        req.history,
+        req.message,
+        visible_reply,
+        thinking,
+        message_id,
+        tool_traces,
+    )
+    response_history, _ = _finalize_history(full_history)
+    _persist_session_snapshot(
+        summary=summary,
+        user_id=user_id,
+        session_id=session_id,
+        full_history=full_history,
+        last_turns=last_turns,
+        state=new_state or {},
+        title=session_title,
+        archived=session_archived,
+    )
     _persist_chat_async(
         prev_summary=summary,
         user_msg=req.message,
@@ -354,6 +502,8 @@ def _handle_chat(req: ChatRequest, user: Dict[str, Any]) -> ChatResponse:
         last_turns=last_turns,
         state=new_state or {},
         traces=tool_traces,
+        title=session_title,
+        archived=session_archived,
     )
 
     return ChatResponse(
@@ -361,7 +511,7 @@ def _handle_chat(req: ChatRequest, user: Dict[str, Any]) -> ChatResponse:
         message_id=message_id,
         reply=visible_reply,
         thinking=thinking,
-        history=full_history,
+        history=response_history,
         tool_traces=[ToolTrace(**t) for t in tool_traces],
     )
 
@@ -457,7 +607,26 @@ def chat_once_stream(
                 final_state = event["state"]
 
         visible_reply, thinking = split_visible_and_thinking(final_result)
-        full_history, last_turns = _finalize_history(messages_to_dicts(final_history))
+        full_history, last_turns, session_title, session_archived = _build_session_history_records(
+            session_snapshot,
+            history,
+            message,
+            visible_reply,
+            thinking,
+            message_id,
+            final_tool_traces,
+        )
+        response_history, _ = _finalize_history(full_history)
+        _persist_session_snapshot(
+            summary=summary,
+            user_id=user_id,
+            session_id=sid,
+            full_history=full_history,
+            last_turns=last_turns,
+            state=final_state or {},
+            title=session_title,
+            archived=session_archived,
+        )
         _persist_chat_async(
             prev_summary=summary,
             user_msg=message,
@@ -468,6 +637,8 @@ def chat_once_stream(
             last_turns=last_turns,
             state=final_state or {},
             traces=final_tool_traces,
+            title=session_title,
+            archived=session_archived,
         )
 
         yield {
@@ -476,7 +647,7 @@ def chat_once_stream(
             "message_id": message_id,
             "reply": visible_reply,
             "thinking": thinking,
-            "history": full_history,
+            "history": response_history,
             "tool_traces": final_tool_traces,
         }
     finally:
@@ -685,7 +856,26 @@ def create_app() -> FastAPI:
                         final_state = event["state"]
 
                 visible_reply, thinking = split_visible_and_thinking(final_result)
-                full_history, last_turns = _finalize_history(messages_to_dicts(final_history))
+                full_history, last_turns, session_title, session_archived = _build_session_history_records(
+                    session_snapshot,
+                    req.history,
+                    req.message,
+                    visible_reply,
+                    thinking,
+                    message_id,
+                    final_tool_traces,
+                )
+                response_history, _ = _finalize_history(full_history)
+                _persist_session_snapshot(
+                    summary=summary,
+                    user_id=user_id,
+                    session_id=sid,
+                    full_history=full_history,
+                    last_turns=last_turns,
+                    state=final_state or {},
+                    title=session_title,
+                    archived=session_archived,
+                )
                 _persist_chat_async(
                     prev_summary=summary,
                     user_msg=req.message,
@@ -696,6 +886,8 @@ def create_app() -> FastAPI:
                     last_turns=last_turns,
                     state=final_state or {},
                     traces=final_tool_traces,
+                    title=session_title,
+                    archived=session_archived,
                 )
 
                 yield _sse_event("done", {
@@ -703,7 +895,7 @@ def create_app() -> FastAPI:
                     "message_id": message_id,
                     "reply": visible_reply,
                     "thinking": thinking,
-                    "history": full_history,
+                    "history": response_history,
                     "tool_traces": [{"tool": t["tool"], "input": t["input"], "output": t["output"]} for t in final_tool_traces],
                 })
             except Exception as exc:
@@ -740,6 +932,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="session not found")
         return {
             "session_id": session_id,
+            "title": snapshot.get("title") or "新会话",
+            "archived": bool(snapshot.get("archived", False)),
             "summary": snapshot.get("summary", ""),
             "history": snapshot.get("history", []),
             "last_turns": snapshot.get("last_turns", []),

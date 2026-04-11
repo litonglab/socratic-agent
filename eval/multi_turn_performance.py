@@ -128,7 +128,7 @@ def benchmark_single_turn(
     from agentic_rag.agent import (
         Agent,
         _execute_tool_action,
-        _find_action,
+        _find_actions,
         _format_citations,
         _prepare_context,
     )
@@ -145,8 +145,8 @@ def benchmark_single_turn(
         ctx.final_prompt += (
             "\n\n【工具可用性覆盖】\n"
             "本次性能评测未启用联网搜索工具。\n"
-            "你当前只允许使用：工具：检索：<查询> 或 工具：拓扑：<查询>。\n"
-            "禁止输出 工具：搜索：<查询>。如果觉得需要外部知识，请先改写为课程检索问题。"
+            "你当前只允许调用工具 `检索` 和 `拓扑`。\n"
+            "如果需要工具，请使用 `<tool_calls>` JSON 数组协议，不要调用 `搜索`。"
         )
 
     route = "agent"
@@ -225,34 +225,38 @@ def benchmark_single_turn(
         generation_s += time.perf_counter() - t1
         final_result = result
 
-        action_match = _find_action(result)
-        if action_match:
-            tool_calls += 1
+        action_matches = _find_actions(result)
+        if action_matches:
+            tool_calls += len(action_matches)
             t2 = time.perf_counter()
-            try:
-                next_prompt = _execute_tool_action(
-                    action_match,
-                    ctx.contextual_actions,
-                    tool_traces,
-                    last_citations,
-                )
-            except Exception as exc:
+            observations = []
+            for action_match in action_matches:
                 action, action_input = action_match.groups()
-                # 当评测禁用了联网搜索，但模型仍输出“工具：搜索：...”时，
-                # 不直接中断整个会话，而是把工具不可用信息反馈给模型，让其回退到课程检索。
-                if action == "搜索" and not enable_websearch:
-                    fallback_observation = (
-                        "检索结果：当前会话未启用联网搜索工具。"
-                        "请仅使用 工具：检索 或 工具：拓扑，并基于已有课程材料继续回答。"
+                try:
+                    observation = _execute_tool_action(
+                        action_match,
+                        ctx.contextual_actions,
+                        tool_traces,
+                        last_citations,
                     )
-                    tool_traces.append({
-                        "tool": action,
-                        "input": action_input,
-                        "output": fallback_observation,
-                    })
-                    next_prompt = fallback_observation
-                else:
-                    raise exc
+                except Exception:
+                    if action == "搜索" and not enable_websearch:
+                        fallback_observation = (
+                            "工具：搜索："
+                            f"{action_input}\n"
+                            "检索结果：当前会话未启用联网搜索工具。"
+                            "请仅使用 工具：检索 或 工具：拓扑，并基于已有课程材料继续回答。"
+                        )
+                        tool_traces.append({
+                            "tool": action,
+                            "input": action_input,
+                            "output": fallback_observation,
+                        })
+                        observation = fallback_observation
+                    else:
+                        raise
+                observations.append(observation)
+            next_prompt = "\n\n".join(observations)
             retrieval_s += time.perf_counter() - t2
             continue
         break

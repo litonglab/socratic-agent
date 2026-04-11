@@ -10,6 +10,7 @@
 示例：
   python eval/build_balanced_qa_dataset.py
   python eval/build_balanced_qa_dataset.py --topo-ratio 0.4 --target-size 96
+  python eval/build_balanced_qa_dataset.py --topo-ratio 0.45 --min-topo-per-experiment 3
   python eval/build_balanced_qa_dataset.py --output eval/qa_dataset_topo_balanced.json
 """
 
@@ -21,7 +22,7 @@ import random
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +47,7 @@ _TOPO_STRONG_PATTERNS = [
 _TOPO_STRONG_RE = re.compile("|".join(_TOPO_STRONG_PATTERNS), re.IGNORECASE)
 _TOPO_LINK_RE = re.compile(r"(连接|互联|链路|路径|经过|端口|接口|分布|成员|拓扑)", re.IGNORECASE)
 _DEVICE_TOKEN_RE = re.compile(r"(RT\d+|SW\d+|PC[a-zA-Z0-9]+)", re.IGNORECASE)
+_EXPERIMENT_RE = re.compile(r"(?:实验\s*|lab[\s_-]?)(\d+)", re.IGNORECASE)
 
 
 def infer_requires_topology(item: dict) -> bool:
@@ -68,6 +70,23 @@ def infer_requires_topology(item: dict) -> bool:
         score += 1
 
     return score >= 3
+
+
+def infer_experiment_id(item: dict) -> str:
+    """从显式字段/来源文本推断实验号，统一输出 labX。"""
+    explicit = str(item.get("experiment_id", "")).strip()
+    if explicit:
+        m = _EXPERIMENT_RE.search(explicit)
+        if m:
+            return f"lab{int(m.group(1))}"
+        if explicit.lower().startswith("lab"):
+            return explicit.lower()
+
+    merged_text = f"{item.get('source', '')} {item.get('question', '')}"
+    m = _EXPERIMENT_RE.search(merged_text)
+    if m:
+        return f"lab{int(m.group(1))}"
+    return "unknown"
 
 
 def stratified_sample(items: List[dict], n: int, rng: random.Random) -> List[dict]:
@@ -101,14 +120,81 @@ def stratified_sample(items: List[dict], n: int, rng: random.Random) -> List[dic
     return sampled[:n]
 
 
+def sample_topology_with_experiment_quota(
+    topo_candidates: List[dict],
+    topo_take: int,
+    min_topo_per_experiment: int,
+    rng: random.Random,
+) -> List[dict]:
+    """拓扑题采样：先满足实验配额，再按类型补齐。"""
+    if topo_take <= 0 or not topo_candidates:
+        return []
+
+    if min_topo_per_experiment <= 0:
+        return stratified_sample(topo_candidates, topo_take, rng)
+
+    grouped: Dict[str, List[dict]] = {}
+    for item in topo_candidates:
+        exp = item.get("_experiment_id", "unknown")
+        if exp == "unknown":
+            continue
+        grouped.setdefault(exp, []).append(item)
+
+    if not grouped:
+        return stratified_sample(topo_candidates, topo_take, rng)
+
+    # 目标配额（可能因 topo_take 不足而降级）
+    desired = {exp: min(min_topo_per_experiment, len(items)) for exp, items in grouped.items()}
+    desired_total = sum(desired.values())
+    if desired_total > topo_take:
+        desired = {exp: 0 for exp in grouped.keys()}
+        ordered = sorted(grouped.keys())
+        while sum(desired.values()) < topo_take:
+            progressed = False
+            for exp in ordered:
+                if desired[exp] < len(grouped[exp]):
+                    desired[exp] += 1
+                    progressed = True
+                    if sum(desired.values()) >= topo_take:
+                        break
+            if not progressed:
+                break
+
+    selected: List[dict] = []
+    selected_q = set()
+    for exp in sorted(grouped.keys()):
+        count = desired.get(exp, 0)
+        if count <= 0:
+            continue
+        picked = stratified_sample(grouped[exp], count, rng)
+        for row in picked:
+            q = str(row.get("question", "")).strip()
+            if q in selected_q:
+                continue
+            selected_q.add(q)
+            selected.append(row)
+
+    remain = topo_take - len(selected)
+    if remain > 0:
+        leftover = [x for x in topo_candidates if str(x.get("question", "")).strip() not in selected_q]
+        selected.extend(stratified_sample(leftover, remain, rng))
+
+    return selected[:topo_take]
+
+
 def dataset_stats(items: List[dict]) -> dict:
-    topo_n = sum(1 for item in items if infer_requires_topology(item))
+    topo_items = [item for item in items if infer_requires_topology(item)]
+    topo_n = len(topo_items)
+    topo_by_experiment = Counter(
+        infer_experiment_id(item) for item in topo_items
+    )
     return {
         "total": len(items),
         "topology_n": topo_n,
         "topology_ratio": round((topo_n / len(items)) if items else 0, 4),
         "type_dist": dict(Counter(item.get("type", "unknown") for item in items)),
         "difficulty_dist": dict(Counter(item.get("difficulty", "unknown") for item in items)),
+        "topology_by_experiment": dict(topo_by_experiment),
     }
 
 
@@ -156,16 +242,20 @@ def build_balanced_dataset(
     target_size: int,
     topo_ratio: float,
     seed: int,
+    min_topo_per_experiment: int = 0,
 ) -> List[dict]:
     rng = random.Random(seed)
 
     base_items = [dict(item) for item in base_dataset]
     for item in base_items:
         item["requires_topology"] = infer_requires_topology(item)
+        item["_experiment_id"] = infer_experiment_id(item)
         item["_origin"] = "base"
 
     base_items = _dedupe_by_question(base_items)
     topo_bank_items = _dedupe_by_question(_prepare_topology_bank(topo_bank))
+    for item in topo_bank_items:
+        item["_experiment_id"] = infer_experiment_id(item)
 
     base_topo = [x for x in base_items if x["requires_topology"]]
     base_non_topo = [x for x in base_items if not x["requires_topology"]]
@@ -196,7 +286,12 @@ def build_balanced_dataset(
         non_topo_take += fill_from_non_topo
         shortfall -= fill_from_non_topo
 
-    topo_sample = stratified_sample(topo_candidates, topo_take, rng)
+    topo_sample = sample_topology_with_experiment_quota(
+        topo_candidates,
+        topo_take=topo_take,
+        min_topo_per_experiment=min_topo_per_experiment,
+        rng=rng,
+    )
     non_topo_sample = stratified_sample(base_non_topo, non_topo_take, rng)
 
     merged = _dedupe_by_question(topo_sample + non_topo_sample)
@@ -210,6 +305,7 @@ def build_balanced_dataset(
         row["orig_id"] = item.get("id")
         row["id"] = idx
         row.pop("_origin", None)
+        row.pop("_experiment_id", None)
         output.append(row)
 
     return output
@@ -222,6 +318,12 @@ def main() -> None:
     parser.add_argument("--output", type=str, default=str(DEFAULT_OUTPUT), help="输出路径")
     parser.add_argument("--target-size", type=int, default=93, help="输出题目总数")
     parser.add_argument("--topo-ratio", type=float, default=0.4, help="目标拓扑题占比（0~1）")
+    parser.add_argument(
+        "--min-topo-per-experiment",
+        type=int,
+        default=0,
+        help="每个实验至少抽样的拓扑题数（0 表示不强制）",
+    )
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     args = parser.parse_args()
 
@@ -244,6 +346,7 @@ def main() -> None:
         target_size=args.target_size,
         topo_ratio=args.topo_ratio,
         seed=args.seed,
+        min_topo_per_experiment=max(0, args.min_topo_per_experiment),
     )
     after = dataset_stats(balanced)
 
@@ -255,10 +358,12 @@ def main() -> None:
         f"原始: total={before['total']}, topo={before['topology_n']} "
         f"({before['topology_ratio']:.1%}), type={before['type_dist']}"
     )
+    print(f"原始拓扑按实验：{before['topology_by_experiment']}")
     print(
         f"输出: total={after['total']}, topo={after['topology_n']} "
         f"({after['topology_ratio']:.1%}), type={after['type_dist']}"
     )
+    print(f"输出拓扑按实验：{after['topology_by_experiment']}")
 
 
 if __name__ == "__main__":

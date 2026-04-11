@@ -85,8 +85,8 @@ def stratified_sample(questions: list, n: int, seed: int = 42) -> list:
 def benchmark_single_query(question: str) -> Dict:
     """对单个问题进行端到端性能测量。"""
     from agentic_rag.agent import (
-        _prepare_context, Agent, _find_action,
-        _execute_tool_action, _format_citations, _get_client,
+        _prepare_context, Agent, _find_actions,
+        _execute_tool_action,
     )
 
     timings = {}
@@ -124,13 +124,35 @@ def benchmark_single_query(question: str) -> Dict:
         total_generation += gen_time
 
         # 检查工具调用
-        action_match = _find_action(result)
-        if action_match:
-            tool_call_count += 1
+        action_matches = _find_actions(result)
+        if action_matches:
+            tool_call_count += len(action_matches)
             t0 = time.perf_counter()
-            next_prompt = _execute_tool_action(
-                action_match, ctx.contextual_actions, tool_traces, last_citations,
-            )
+            observations = []
+            for action_match in action_matches:
+                action, action_input = action_match.groups()
+                try:
+                    observation = _execute_tool_action(
+                        action_match, ctx.contextual_actions, tool_traces, last_citations,
+                    )
+                except Exception as exc:
+                    if action == "搜索":
+                        fallback_observation = (
+                            "工具：搜索："
+                            f"{action_input}\n"
+                            "检索结果：当前会话未启用联网搜索工具。"
+                            "请仅使用 工具：检索 或 工具：拓扑，并基于已有课程材料继续回答。"
+                        )
+                        tool_traces.append({
+                            "tool": action,
+                            "input": action_input,
+                            "output": fallback_observation,
+                        })
+                        observation = fallback_observation
+                    else:
+                        raise exc
+                observations.append(observation)
+            next_prompt = "\n\n".join(observations)
             retrieval_time = time.perf_counter() - t0
             total_retrieval += retrieval_time
             continue

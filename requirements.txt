@@ -20,3 +20,4 @@ sentence-transformers
 ddgs
 rank-bm25
 jieba
+mcp[cli]
