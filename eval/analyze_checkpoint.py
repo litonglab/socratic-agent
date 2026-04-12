@@ -3,12 +3,34 @@ import json
 import sys
 from pathlib import Path
 
+ABLATION_OVERALL_WEIGHTS = {
+    "relevance": 0.15,
+    "faithfulness": 0.20,
+    "completeness": 0.15,
+    "technical_accuracy": 0.15,
+    "pedagogical_guidance": 0.20,
+    "progressive_disclosure": 0.15,
+}
+
+
+def _recalc_overall(row: dict) -> None:
+    """从六维原始分重算 overall（覆盖旧整数值）。"""
+    vals = [row.get(k) for k in ABLATION_OVERALL_WEIGHTS]
+    if any(v is None for v in vals):
+        return
+    row["overall"] = round(
+        sum(v * w for v, w in zip(vals, ABLATION_OVERALL_WEIGHTS.values())), 3
+    )
+
+
 checkpoint = Path(__file__).resolve().parent / "results" / "checkpoints" / "ablation_checkpoint.jsonl"
 rows = []
 with open(checkpoint, encoding="utf-8") as f:
     for line in f:
         if line.strip():
-            rows.append(json.loads(line))
+            r = json.loads(line)
+            _recalc_overall(r)
+            rows.append(r)
 
 print(f"总记录数: {len(rows)}")
 # 排除变体D + 排除API失败（overall=1且answer很短）

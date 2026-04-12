@@ -90,3 +90,6 @@ test_examples/
 
 # 非必要文件
 docs/
+
+# cursor rules
+.cursor/

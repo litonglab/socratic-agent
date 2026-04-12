@@ -40,6 +40,24 @@ SCORE_NAMES_ZH = {
     "overall": "综合",
 }
 
+RETRIEVAL_OVERALL_WEIGHTS = {
+    "relevance": 0.2,
+    "faithfulness": 0.3,
+    "completeness": 0.3,
+    "technical_accuracy": 0.2,
+}
+
+
+def _recalc_overall(row: dict) -> None:
+    """从四维原始分重算 overall（覆盖 CSV 中可能存在的旧整数值）。"""
+    vals = [row.get(k) for k in RETRIEVAL_OVERALL_WEIGHTS]
+    if any(v is None for v in vals):
+        row["overall"] = None
+    else:
+        row["overall"] = round(
+            sum(v * w for v, w in zip(vals, RETRIEVAL_OVERALL_WEIGHTS.values())), 3
+        )
+
 # chunk size 映射（实验名 → chunk_size）
 CHUNK_SIZE_MAP = {
     "baseline_hybrid_rerank": 500,
@@ -77,6 +95,7 @@ def load_all_results(latest_only: bool = False) -> Dict[str, List[dict]]:
                     for key in SCORE_KEYS:
                         val = row.get(key, "")
                         row[key] = float(val) if val and val != "None" else None
+                    _recalc_overall(row)
                     rows.append(row)
         if rows:
             all_results[exp_name] = rows

@@ -112,9 +112,14 @@ def _get_session_lock(user_id: str, session_id: str) -> threading.Lock:
         return lock
 
 
+def _remove_session_lock(user_id: str, session_id: str) -> None:
+    key = (user_id, session_id)
+    with _SESSION_LOCKS_GUARD:
+        _SESSION_LOCKS.pop(key, None)
+
+
 @contextmanager
 def _hold_session_lock(user_id: str, session_id: str):
-    # 同一会话的读取、生成与落盘需要串行，避免旧快照覆盖新状态。
     lock = _get_session_lock(user_id, session_id)
     lock.acquire()
     try:
@@ -446,6 +451,7 @@ def delete_session_for_user(*, token: str, session_id: str) -> Dict[str, Any]:
         if snapshot is None:
             raise HTTPException(status_code=404, detail="session not found")
         delete_user_session(user["id"], session_id)
+    _remove_session_lock(user["id"], session_id)
     return {"ok": True, "session_id": session_id}
 
 
@@ -1065,9 +1071,11 @@ def create_app() -> FastAPI:
                 with _LEGACY_STORE_LOCK:
                     _LEGACY_SESSIONS.pop(session_id, None)
                     _LEGACY_SESSION_STATES.pop(session_id, None)
+            _remove_session_lock(_LEGACY_SESSION_USER_ID, session_id)
             return {"ok": True}
         with _hold_session_lock(user["id"], session_id):
             delete_user_session(user["id"], session_id)
+        _remove_session_lock(user["id"], session_id)
         return {"ok": True}
 
     @app.get("/api/sessions")

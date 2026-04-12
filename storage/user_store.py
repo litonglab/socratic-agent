@@ -459,22 +459,33 @@ def authenticate_user(username: str, password: str) -> Tuple[Optional[Dict[str, 
     return user, ok
 
 
+_LAST_TOKEN_CLEANUP = 0.0
+_TOKEN_CLEANUP_INTERVAL = 300  # 每 5 分钟清理一次过期 token
+
+
+def _maybe_cleanup_expired_tokens(conn: sqlite3.Connection) -> None:
+    global _LAST_TOKEN_CLEANUP
+    import time
+    now = time.monotonic()
+    if now - _LAST_TOKEN_CLEANUP < _TOKEN_CLEANUP_INTERVAL:
+        return
+    _LAST_TOKEN_CLEANUP = now
+    conn.execute("DELETE FROM tokens WHERE expires_at < ?", (_utc_now(),))
+
+
 def get_user_by_token(token: str) -> Optional[Dict[str, Any]]:
     if not token:
         return None
     conn = _connect()
     try:
-        conn.execute(
-            "DELETE FROM tokens WHERE expires_at < ?",
-            (_utc_now(),),
-        )
+        _maybe_cleanup_expired_tokens(conn)
         row = conn.execute(
             """
             SELECT u.* FROM users u
             JOIN tokens t ON t.user_id = u.id
-            WHERE t.token = ?
+            WHERE t.token = ? AND t.expires_at >= ?
             """,
-            (token,),
+            (token, _utc_now()),
         ).fetchone()
         if not row:
             conn.commit()
@@ -792,8 +803,8 @@ def record_interaction_metric(
             ),
         )
         conn.commit()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[Warning] record_interaction_metric failed: {exc}")
     finally:
         conn.close()
 

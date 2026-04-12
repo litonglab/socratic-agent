@@ -1,6 +1,7 @@
 import json
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -107,18 +108,14 @@ class AgentState(TypedDict, total=False):
     experiment_label: str
 
 
-# 延迟初始化 LLM 客户端
-_client = None
-_client_lock = threading.Lock()
+# 每个线程独立持有一个 DeepSeekChatClient（requests.Session 非线程安全）
+_client_local = threading.local()
 
 
 def _get_client():
-    global _client
-    if _client is None:
-        with _client_lock:
-            if _client is None:
-                _client = build_chat_llm(temperature=0)
-    return _client
+    if not hasattr(_client_local, "client"):
+        _client_local.client = build_chat_llm(temperature=0)
+    return _client_local.client
 
 
 # -------------------------------------------------------------------------
@@ -461,11 +458,6 @@ def _prepare_context(
     state.setdefault("user_turn_count", 0)
     state.setdefault("lab_turn_count", 0)
 
-    # 水平个性化：新会话根据学生水平设置初始 Hint Level
-    if "hint_level" not in state and user_id:
-        from storage.proficiency import get_initial_hint_level
-        state["hint_level"] = get_initial_hint_level(user_id)
-
     state["user_turn_count"] += 1
 
     q = (question or "").strip()
@@ -497,9 +489,20 @@ def _prepare_context(
 
     # 问题分类
     category = classification["category"]
+    prev_category = state.get("question_category", "")
     if category == "LAB_TROUBLESHOOTING":
-        state["lab_turn_count"] += 1
+        if prev_category == "LAB_TROUBLESHOOTING":
+            state["lab_turn_count"] += 1
+        else:
+            state["lab_turn_count"] = 1
+    else:
+        state["lab_turn_count"] = 0
     state["question_category"] = category
+
+    # 水平个性化：新会话根据学生水平设置初始 Hint Level（分类完成后才能用 category）
+    if "hint_level" not in state and user_id:
+        from storage.proficiency import get_initial_hint_level
+        state["hint_level"] = get_initial_hint_level(user_id, category)
 
     experiment_id, experiment_label = _resolve_experiment_context(q, history, state)
 
@@ -575,6 +578,17 @@ def _prepare_context(
         if prof_summary:
             final_prompt += f"\n\n【学生水平参考】\n{prof_summary}"
 
+    # 构建工具表（需要在 prompt 生成之前完成，prompt 会引用工具名）
+    def _rag_with_context(msg: str):
+        return RAGAgent(msg, category=category, hint_level=current_hint_level)
+
+    contextual_actions = {
+        "检索": _rag_with_context,
+        "拓扑": lambda q: _get_topo_retriever()(q, experiment_id=state.get("experiment_id")),
+    }
+    if enable_websearch:
+        contextual_actions["搜索"] = WebSearch
+
     if experiment_id and experiment_label:
         final_prompt += (
             f"\n\n【实验上下文】\n"
@@ -582,17 +596,23 @@ def _prepare_context(
             f"如果需要调用拓扑工具，只使用该实验下审核通过的拓扑 JSON，不要混用其他实验数据。"
         )
 
+    tool_descriptions = {
+        "检索": "从课程实验指导书中检索相关段落，返回带引用标注的文档证据。",
+        "拓扑": "读取实验的结构化拓扑数据（设备、接口、链路、IP/VLAN），需要在问题或上下文中包含实验编号。",
+        "搜索": "联网搜索外部信息，适合课程文档未覆盖的内容。",
+    }
+    tool_list_str = "\n".join(
+        f"  - {name}：{tool_descriptions.get(name, '无描述')}"
+        for name in contextual_actions.keys()
+    )
     final_prompt += (
         "\n\n【工具调用协议】\n"
-        "如果你需要调用一个或多个工具，必须输出一个 `<tool_calls>...</tool_calls>` 代码块，"
-        "其中内容是 JSON 数组；数组元素格式固定为 "
-        '{"tool": "检索|拓扑|搜索", "input": "具体查询"}。'
-        "\n"
-        "同一轮若需要多个工具，请把多个对象按执行顺序放在同一个数组中，系统会批量执行。"
-        "\n"
+        "你可以使用以下工具获取信息：\n" + tool_list_str + "\n\n"
+        "调用方式：输出 `<tool_calls>...</tool_calls>` 代码块，内容为 JSON 数组，"
+        '元素格式：{"tool": "工具名", "input": "具体查询"}。\n'
+        "同一数组内的工具会被系统并行执行，你可以根据需要在一轮内调用任意数量的工具。\n"
+        "请根据问题本身判断需要哪些工具，不需要的工具不必调用。\n"
         "触发工具调用时，本轮不要输出面向学生的最终回答，等待系统返回全部工具结果后再继续。"
-        "\n"
-        "除兼容旧版本外，不要再输出 `工具：检索：...` 这种单行格式。"
     )
 
     debug_info = None
@@ -603,17 +623,6 @@ def _prepare_context(
         )
         print(debug_info)
         print(f"[DEBUG] Strategy: {strategy_instruction[:50]}...")
-
-    # 构建工具表
-    def _rag_with_context(msg: str):
-        return RAGAgent(msg, category=category, hint_level=current_hint_level)
-
-    contextual_actions = {
-        "检索": _rag_with_context,
-        "拓扑": lambda q: _get_topo_retriever()(q, experiment_id=state.get("experiment_id")),
-    }
-    if enable_websearch:
-        contextual_actions["搜索"] = WebSearch
 
     return _QueryContext(
         early_reply=None,
@@ -639,9 +648,25 @@ def _execute_tool_action(
     """执行单次工具调用，返回观察结果文本。"""
     action, action_input = action_match.groups()
     if action not in contextual_actions:
-        raise Exception(f"Unknown action: {action}: {action_input}")
+        available = ", ".join(contextual_actions.keys())
+        obs_output_str = "未知工具 " + action + "，可用工具：" + available + "。请检查工具名后重试。"
+        tool_traces.append({
+            "tool": action,
+            "input": action_input,
+            "output": obs_output_str,
+        })
+        return f"工具：{action}：{action_input}\n错误：{obs_output_str}"
 
-    observation = contextual_actions[action](action_input)
+    try:
+        observation = contextual_actions[action](action_input)
+    except Exception as exc:
+        obs_output_str = "工具 " + action + " 执行失败：" + str(exc)
+        tool_traces.append({
+            "tool": action,
+            "input": action_input,
+            "output": obs_output_str,
+        })
+        return f"工具：{action}：{action_input}\n错误：{obs_output_str}"
     if isinstance(observation, dict) and observation.get("citations"):
         existing = {
             (c.get("source", "unknown"), c.get("snippet", ""))
@@ -673,12 +698,42 @@ def _execute_tool_actions(
     tool_traces: List[Dict[str, Any]],
     last_citations: List[Dict[str, Any]],
 ) -> str:
-    """执行一批工具调用，并将全部观察结果拼接回下一轮上下文。"""
-    observations = [
-        _execute_tool_action(action_match, contextual_actions, tool_traces, last_citations)
-        for action_match in action_matches
-    ]
-    return "\n\n".join(observations)
+    """并行执行一批工具调用，按原始顺序拼接结果回下一轮上下文。"""
+    if len(action_matches) <= 1:
+        return "\n\n".join(
+            _execute_tool_action(m, contextual_actions, tool_traces, last_citations)
+            for m in action_matches
+        )
+
+    per_action_traces: List[List[Dict[str, Any]]] = [[] for _ in action_matches]
+    per_action_citations: List[List[Dict[str, Any]]] = [[] for _ in action_matches]
+    results: Dict[int, str] = {}
+
+    with ThreadPoolExecutor(max_workers=min(len(action_matches), 4)) as pool:
+        futures = {
+            pool.submit(
+                _execute_tool_action, m, contextual_actions,
+                per_action_traces[idx], per_action_citations[idx],
+            ): idx
+            for idx, m in enumerate(action_matches)
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            results[idx] = future.result()
+
+    for traces_batch in per_action_traces:
+        tool_traces.extend(traces_batch)
+    for citations_batch in per_action_citations:
+        existing = {(c.get("source", "unknown"), c.get("snippet", "")) for c in last_citations}
+        for c in citations_batch:
+            key = (c.get("source", "unknown"), c.get("snippet", ""))
+            if key not in existing:
+                existing.add(key)
+                c["id"] = len(last_citations) + 1
+                last_citations.append(c)
+
+    ordered = [results[i] for i in range(len(action_matches))]
+    return "\n\n".join(ordered)
 
 
 def _find_action(text: str):
@@ -746,6 +801,9 @@ def query(
             continue
 
         break
+
+    if _find_actions(final_result):
+        final_result = "抱歉，我在多轮工具调用后未能生成最终回答，请尝试换一种方式提问。"
 
     # 追加引用
     if last_citations and "引用：" not in (final_result or ""):
@@ -858,6 +916,10 @@ def query_stream(
 
         final_result = full_turn_text
         break
+
+    if _find_actions(final_result):
+        final_result = "抱歉，我在多轮工具调用后未能生成最终回答，请尝试换一种方式提问。"
+        yield {"type": "token", "content": final_result}
 
     # 引用
     if last_citations and "引用：" not in (final_result or ""):

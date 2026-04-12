@@ -203,7 +203,15 @@ def _load_user_sessions(username: str) -> None:
             backend_sessions = load_user_session_cache(token=st.session_state.auth_token).get("sessions", {})
         except Exception:
             backend_sessions = {}
-    st.session_state.sessions = _normalize_sessions(backend_sessions)
+    existing_local = {
+        sid: sess for sid, sess in (st.session_state.get("sessions") or {}).items()
+        if str(sid).startswith("local_") and sess.get("messages")
+    }
+    merged = _normalize_sessions(backend_sessions)
+    for sid, sess in existing_local.items():
+        if sid not in merged:
+            merged[sid] = sess
+    st.session_state.sessions = merged
     preferred_session_id = store.get("active_session_id")
     if preferred_session_id in st.session_state.sessions:
         st.session_state.active_session_id = preferred_session_id

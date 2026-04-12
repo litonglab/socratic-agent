@@ -6,6 +6,12 @@
   python eval/retrieval/run_experiments.py --only baseline_similarity   # 只跑指定实验
   python eval/retrieval/run_experiments.py --only baseline_similarity,baseline_mmr
   python eval/retrieval/run_experiments.py --dataset eval/qa_dataset_small.json
+  python eval/retrieval/run_experiments.py --workers 4                  # 每个实验内并行处理 4 道题
+
+--workers 说明：
+  默认值 1（顺序执行）。设为 3-5 可显著提速，瓶颈是 DeepSeek/GPT-4o 的 API 响应时延。
+  线程数过高可能触发 API 限速（429），建议不超过 6。
+  断点续跑（--resume）与并行完全兼容。
 
 每个实验独立生成一个 CSV 文件保存到 eval/retrieval/results/，不会覆盖。
 
@@ -21,6 +27,9 @@ import csv
 import pickle
 import time
 import re
+import threading
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -47,6 +56,10 @@ QA_DATASET = ROOT / "eval" / "qa_dataset.json"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 CHECKPOINT_DIR = RESULTS_DIR / "checkpoints"
 
+# ── 多线程共享锁 ─────────────────────────────────────────
+_ckpt_lock = threading.Lock()    # 断点文件写入锁
+_print_lock = threading.Lock()   # 终端输出锁，防止并发 print 行内容交错
+
 
 def parse_cli_args(argv: List[str]) -> Dict[str, Any]:
     """解析命令行参数。"""
@@ -56,6 +69,7 @@ def parse_cli_args(argv: List[str]) -> Dict[str, Any]:
         "start_index": 1,
         "start_qid": None,
         "dataset": str(QA_DATASET),
+        "workers": 1,
     }
 
     i = 0
@@ -89,11 +103,24 @@ def parse_cli_args(argv: List[str]) -> Dict[str, Any]:
                 raise ValueError("--dataset 需要一个文件路径")
             args["dataset"] = argv[i + 1].strip()
             i += 2
+        elif token == "--workers":
+            if i + 1 >= len(argv):
+                raise ValueError("--workers 需要一个正整数")
+            try:
+                args["workers"] = int(argv[i + 1])
+            except ValueError as e:
+                raise ValueError("--workers 必须是整数") from e
+            if args["workers"] < 1:
+                raise ValueError("--workers 必须 >= 1")
+            i += 2
         else:
             raise ValueError(f"未知参数：{token}")
 
     if args["start_qid"] and args["start_index"] != 1:
         raise ValueError("--start-qid 与 --start-index 不能同时使用")
+
+    if args["workers"] > 1 and args["start_qid"] is not None:
+        raise ValueError("--workers > 1 时不支持 --start-qid，请改用 --start-index")
 
     return args
 
@@ -116,8 +143,30 @@ def _load_checkpoint_rows(checkpoint_path: Path) -> List[Dict[str, Any]]:
 
 
 def _append_checkpoint_row(checkpoint_path: Path, row: Dict[str, Any]) -> None:
-    with open(checkpoint_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    with _ckpt_lock:
+        with open(checkpoint_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+# ══ 综合分权重（公式 8）═══════════════════════════════════
+RETRIEVAL_OVERALL_WEIGHTS = {
+    "relevance": 0.2,
+    "faithfulness": 0.3,
+    "completeness": 0.3,
+    "technical_accuracy": 0.2,
+}
+
+
+def _compute_retrieval_overall(scores: Dict[str, Any]) -> Optional[float]:
+    """按 RETRIEVAL_OVERALL_WEIGHTS 计算综合分（浮点，不做整数舍入）。
+
+    保留浮点可保证 avg(overall_i) == sum(w_j * avg(dim_j))，
+    使汇总表格与公式严格自洽。
+    """
+    vals = [scores.get(k) for k in RETRIEVAL_OVERALL_WEIGHTS]
+    if any(v is None for v in vals):
+        return None
+    return round(sum(v * w for v, w in zip(vals, RETRIEVAL_OVERALL_WEIGHTS.values())), 3)
+
 
 # ══ 打分 Prompt ══════════════════════════════════════════
 
@@ -170,18 +219,14 @@ JUDGE_USER_TEMPLATE_WITH_REF = """\
    2=多处技术错误，影响理解
    1=技术内容严重错误
 
-综合（overall）= 加权平均，权重：
-  相关性 0.2 + 忠实性 0.3 + 完整性 0.3 + 技术准确 0.2
-  四舍五入到整数。
 ────────────────────────────────────────────────────
 
-请严格按以下 JSON 格式输出，不要有任何其他文字：
+请严格按以下 JSON 格式输出（只需 4 个维度分 + 理由），不要有任何其他文字：
 {{
   "relevance": <1-5>,
   "faithfulness": <1-5>,
   "completeness": <1-5>,
   "technical_accuracy": <1-5>,
-  "overall": <1-5>,
   "comment": "<评分简要理由，不超过 60 字>"
 }}"""
 
@@ -226,18 +271,14 @@ JUDGE_USER_TEMPLATE_NO_REF = """\
    2=多处技术错误，影响理解
    1=技术内容严重错误
 
-综合（overall）= 加权平均，权重：
-  相关性 0.2 + 忠实性 0.3 + 完整性 0.3 + 技术准确 0.2
-  四舍五入到整数。
 ────────────────────────────────────────────────────
 
-请严格按以下 JSON 格式输出，不要有任何其他文字：
+请严格按以下 JSON 格式输出（只需 4 个维度分 + 理由），不要有任何其他文字：
 {{
   "relevance": <1-5>,
   "faithfulness": <1-5>,
   "completeness": <1-5>,
   "technical_accuracy": <1-5>,
-  "overall": <1-5>,
   "comment": "<评分简要理由，不超过 60 字>"
 }}"""
 
@@ -473,7 +514,9 @@ def judge_answer(
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-        return json.loads(raw)
+        scores = json.loads(raw)
+        scores["overall"] = _compute_retrieval_overall(scores)
+        return scores
     except Exception as e:
         print(f"    [打分失败] {e}")
         return {
@@ -481,6 +524,67 @@ def judge_answer(
             "completeness": None, "technical_accuracy": None,
             "overall": None, "comment": f"打分失败: {e}",
         }
+
+
+# ══ 单题处理（可并发调用）═══════════════════════════════
+
+def _process_question_task(
+    retriever,
+    llm,
+    openai_client: OpenAI,
+    q_item: dict,
+    idx: int,
+    total: int,
+    exp_name: str,
+    index_name: str,
+    retriever_name: str,
+    checkpoint_path: Path,
+    stagger_delay: float = 0.0,
+) -> Dict[str, Any]:
+    """执行单道题的完整流程：检索 → 生成 → 打分，线程安全。
+
+    stagger_delay: 任务开始前的错开延迟（秒），并行模式下由调用方传入，
+                   用于将各线程的首批 API 请求分散开，避免瞬时并发触发限速。
+    """
+    if stagger_delay > 0:
+        time.sleep(stagger_delay)
+
+    qid = q_item.get("id", "?")
+    question = q_item.get("question", "")
+    qtype = q_item.get("type", "unknown")
+    reference = q_item.get("reference", "")
+
+    try:
+        docs = retriever.invoke(question)
+    except Exception:
+        docs = retriever.get_relevant_documents(question)
+
+    answer = generate_answer(llm, question, docs)
+    scores = judge_answer(openai_client, question, answer, docs, reference)
+
+    # 整行一次性输出，避免并发时行内容交错
+    with _print_lock:
+        q_preview = question[:40] + ("..." if len(question) > 40 else "")
+        print(f"  [{idx}/{total}] Q{qid}: {q_preview} overall={scores.get('overall', '?')}")
+
+    row = {
+        "experiment": exp_name,
+        "question_id": qid,
+        "question": question,
+        "question_type": qtype,
+        "index": index_name,
+        "retriever": retriever_name,
+        "retrieved_docs_count": len(docs),
+        "answer_length": len(answer),
+        "relevance": scores.get("relevance"),
+        "faithfulness": scores.get("faithfulness"),
+        "completeness": scores.get("completeness"),
+        "technical_accuracy": scores.get("technical_accuracy"),
+        "overall": scores.get("overall"),
+        "comment": scores.get("comment", ""),
+    }
+    _append_checkpoint_row(checkpoint_path, row)
+    return row
 
 
 # ══ 单个实验运行 ═════════════════════════════════════════
@@ -494,6 +598,7 @@ def run_single_experiment(
     resume: bool = False,
     start_index: int = 1,
     start_qid: Optional[str] = None,
+    workers: int = 1,
 ):
     """运行单个实验，返回 (rows, output_csv_path)。"""
     exp_name = exp["name"]
@@ -504,7 +609,7 @@ def run_single_experiment(
     retriever_config = RETRIEVER_VARIANTS[retriever_name]
 
     print(f"\n{'='*65}")
-    print(f"实验：{exp_name}")
+    print(f"实验：{exp_name}  (workers={workers})")
     print(f"  索引：{index_name} | 检索：{retriever_name}")
     print(f"{'='*65}")
 
@@ -538,7 +643,7 @@ def run_single_experiment(
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     checkpoint_path = CHECKPOINT_DIR / f"{_safe_name(exp_name)}.jsonl"
     checkpoint_rows = _load_checkpoint_rows(checkpoint_path) if resume else []
-    completed_qids = {str(r.get("question_id")) for r in checkpoint_rows}
+    completed_qids: set = {str(r.get("question_id")) for r in checkpoint_rows}
     rows = list(checkpoint_rows)
 
     if resume:
@@ -546,16 +651,13 @@ def run_single_experiment(
     elif checkpoint_path.exists():
         print(f"  [提示] 存在历史断点文件但未启用 --resume：{checkpoint_path}")
 
-    # 5. 逐题评测
+    # 5. 筛选待处理题目
     total = len(questions)
     started_by_qid = start_qid is None
+    pending: List[tuple] = []  # (原始序号, q_item)
 
     for i, q_item in enumerate(questions, 1):
-        qid = q_item.get("id", "?")
-        question = q_item.get("question", "")
-        qtype = q_item.get("type", "unknown")
-        reference = q_item.get("reference", "")
-        qid_str = str(qid)
+        qid_str = str(q_item.get("id", "?"))
 
         if i < start_index:
             continue
@@ -564,50 +666,55 @@ def run_single_experiment(
                 continue
             started_by_qid = True
         if qid_str in completed_qids:
-            print(f"  [{i}/{total}] Q{qid}: 已在断点中，跳过")
+            print(f"  [{i}/{total}] Q{qid_str}: 已在断点中，跳过")
             continue
-
-        print(f"  [{i}/{total}] Q{qid}: {question[:40]}{'...' if len(question)>40 else ''}", end=" ", flush=True)
-
-        # 检索
-        try:
-            docs = retriever.invoke(question)
-        except Exception:
-            docs = retriever.get_relevant_documents(question)
-
-        # 生成回答
-        answer = generate_answer(llm, question, docs)
-
-        # GPT-4o 打分
-        scores = judge_answer(openai_client, question, answer, docs, reference)
-        print(f"overall={scores.get('overall', '?')}")
-
-        row = {
-            "experiment": exp_name,
-            "question_id": qid,
-            "question": question,
-            "question_type": qtype,
-            "index": index_name,
-            "retriever": retriever_name,
-            "retrieved_docs_count": len(docs),
-            "answer_length": len(answer),
-            "relevance": scores.get("relevance"),
-            "faithfulness": scores.get("faithfulness"),
-            "completeness": scores.get("completeness"),
-            "technical_accuracy": scores.get("technical_accuracy"),
-            "overall": scores.get("overall"),
-            "comment": scores.get("comment", ""),
-        }
-        rows.append(row)
-        _append_checkpoint_row(checkpoint_path, row)
-        completed_qids.add(qid_str)
-
-        time.sleep(0.5)
+        pending.append((i, q_item))
 
     if start_qid and not started_by_qid:
         raise ValueError(f"--start-qid={start_qid} 未在数据集中找到")
 
-    # 6. 保存结果 CSV
+    # 6. 执行评测（顺序 or 并发）
+    if workers == 1:
+        for i, q_item in pending:
+            row = _process_question_task(
+                retriever, llm, openai_client,
+                q_item, i, total,
+                exp_name, index_name, retriever_name,
+                checkpoint_path,
+            )
+            rows.append(row)
+            completed_qids.add(str(q_item.get("id", "?")))
+            time.sleep(0.5)  # 顺序模式下拉开相邻请求间距，降低 API 限速风险
+    else:
+        print(f"  [并行] 提交 {len(pending)} 道题，最多 {workers} 线程同时运行…")
+        # 同一批次内各线程错开 1.0s，将每批首个 API 请求分散，降低瞬时并发触发限速的概率
+        # 使用 slot % workers 让错开量始终在 [0, workers-1] 秒范围内
+        _STAGGER_INTERVAL = 1.0
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_idx = {
+                executor.submit(
+                    _process_question_task,
+                    retriever, llm, openai_client,
+                    q_item, i, total,
+                    exp_name, index_name, retriever_name,
+                    checkpoint_path,
+                    (slot % workers) * _STAGGER_INTERVAL,  # stagger_delay
+                ): i
+                for slot, (i, q_item) in enumerate(pending)
+            }
+            for future in as_completed(future_to_idx):
+                try:
+                    row = future.result()
+                    rows.append(row)
+                except Exception as exc:
+                    orig_idx = future_to_idx[future]
+                    with _print_lock:
+                        # 用 format_exc() 转成字符串再 print，确保走 stdout 并受锁保护
+                        print(f"  [错误] 第 {orig_idx} 题处理失败：{exc}")
+                        print(traceback.format_exc(), end="")
+
+    # 7. 保存结果 CSV（按 question_id 排序保持可读性）
+    rows.sort(key=lambda r: r.get("question_id", 0))
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_csv = RESULTS_DIR / f"{exp_name}_{timestamp}.csv"
@@ -675,6 +782,7 @@ def main():
         print("  python eval/retrieval/run_experiments.py --dataset eval/qa_dataset_small.json")
         print("  python eval/retrieval/run_experiments.py --start-index 37")
         print("  python eval/retrieval/run_experiments.py --start-qid 37")
+        print("  python eval/retrieval/run_experiments.py --workers 4")
         sys.exit(1)
 
     dataset_path = Path(cli_args["dataset"])
@@ -707,6 +815,8 @@ def main():
         print(f"从题目序号开始：--start-index {cli_args['start_index']}")
     if cli_args["start_qid"] is not None:
         print(f"从题号开始：--start-qid {cli_args['start_qid']}")
+    if cli_args["workers"] > 1:
+        print(f"并行线程数：--workers {cli_args['workers']}")
 
     # 初始化共享资源
     print("\n初始化模型...")
@@ -719,7 +829,7 @@ def main():
     openai_client = OpenAI(api_key=openai_key)
     print("模型初始化完成\n")
 
-    # 逐个运行实验
+    # 逐个运行实验（实验间顺序执行，实验内并发）
     all_rows = {}
     for exp in experiments_to_run:
         rows, csv_path = run_single_experiment(
@@ -731,6 +841,7 @@ def main():
             resume=cli_args["resume"],
             start_index=cli_args["start_index"],
             start_qid=cli_args["start_qid"],
+            workers=cli_args["workers"],
         )
         all_rows[exp["name"]] = rows
 

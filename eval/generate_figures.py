@@ -922,7 +922,7 @@ def fig_ablation_radar(result_json: Path, outdir: Path):
 
     show_keys = [k for k in variants.keys()]
     show_names = {
-        "A": "完整系统", "C": "无苏格拉底策略", "D": "无拓扑模块", "F": "纯大模型基线"
+        "A": "完整系统", "C": "无苏格拉底策略", "D": "无拓扑模块", "F": "无RAG模块"
     }
     colors = ["#C44E52", "#4C72B0", "#55A868", "#8172B2"]
 
