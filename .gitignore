@@ -93,3 +93,6 @@ docs/
 
 # cursor rules
 .cursor/
+
+# codex rules
+.codex
