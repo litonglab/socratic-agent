@@ -19,16 +19,25 @@ from langchain_classic.retrievers.document_compressors import CrossEncoderRerank
 # -------------------------
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
-_INDEX_ENV = os.getenv("RAG_INDEX_DIR")
-if _INDEX_ENV:
-    INDEX_DIR = BASE_DIR / _INDEX_ENV
-else:
-    _preferred_index = BASE_DIR / "faiss_index" / "enriched"
-    INDEX_DIR = _preferred_index if _preferred_index.exists() else BASE_DIR / "faiss_index"
-REBUILD_INDEX = os.getenv("RAG_REBUILD_INDEX", "0").lower() in {"1", "true", "yes"}
-EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
-RERANKER_MODEL_NAME = os.getenv("RERANKER_MODEL_NAME", "BAAI/bge-reranker-v2-m3")
-DISABLE_RERANKER = os.getenv("DISABLE_RERANKER", "0").lower() in {"1", "true", "yes"}
+
+
+def _resolve_index_dir() -> Path:
+    index_env = os.getenv("RAG_INDEX_DIR")
+    if index_env:
+        candidate = Path(index_env)
+        return candidate if candidate.is_absolute() else BASE_DIR / candidate
+    preferred_index = BASE_DIR / "faiss_index" / "enriched"
+    return preferred_index if preferred_index.exists() else BASE_DIR / "faiss_index"
+
+
+def _resolve_runtime_config() -> Dict[str, Any]:
+    return {
+        "index_dir": _resolve_index_dir(),
+        "rebuild_index": os.getenv("RAG_REBUILD_INDEX", "0").lower() in {"1", "true", "yes"},
+        "embedding_model_name": os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3"),
+        "reranker_model_name": os.getenv("RERANKER_MODEL_NAME", "BAAI/bge-reranker-v2-m3"),
+        "disable_reranker": os.getenv("DISABLE_RERANKER", "0").lower() in {"1", "true", "yes"},
+    }
 
 # -------------------------
 # 延迟初始化状态（首次查询时才真正加载）
@@ -260,21 +269,28 @@ def _ensure_rag_initialized():
         if _initialized:
             return
 
+        config = _resolve_runtime_config()
+        index_dir: Path = config["index_dir"]
+        rebuild_index: bool = config["rebuild_index"]
+        embedding_model_name: str = config["embedding_model_name"]
+        reranker_model_name: str = config["reranker_model_name"]
+        disable_reranker: bool = config["disable_reranker"]
+
         print("[RAG] 开始初始化...")
 
         # 1. 嵌入模型
-        print(f"[RAG] 加载 Embedding 模型：{EMBEDDING_MODEL_NAME} ...")
+        print(f"[RAG] 加载 Embedding 模型：{embedding_model_name} ...")
         embeddings = HuggingFaceEmbeddings(
-            model_name=EMBEDDING_MODEL_NAME,
+            model_name=embedding_model_name,
             encode_kwargs={"normalize_embeddings": True},
         )
 
         # 2. 优先复用 index 对应的 chunks，确保 BM25 与 Dense 使用同一套文档块
         chunks = None
-        if not REBUILD_INDEX and Path(INDEX_DIR).exists():
-            chunks = _load_chunks_from_index(Path(INDEX_DIR))
+        if not rebuild_index and index_dir.exists():
+            chunks = _load_chunks_from_index(index_dir)
             if chunks:
-                print(f"[RAG] 从 {INDEX_DIR / 'chunks.pkl'} 加载运行时 chunks，共 {len(chunks)} 个")
+                print(f"[RAG] 从 {index_dir / 'chunks.pkl'} 加载运行时 chunks，共 {len(chunks)} 个")
 
         # 3. 如果需要，再从 docx 重新切分并构建索引
         if chunks is None:
@@ -291,33 +307,33 @@ def _ensure_rag_initialized():
 
             chunks = _prepare_runtime_chunks(
                 all_chunks,
-                add_context_prefix=(INDEX_DIR.name == "enriched"),
+                add_context_prefix=(index_dir.name == "enriched"),
             )
             print(f"[RAG] 文档加载完成，共 {len(chunks)} 个 chunk")
 
         _loaded_chunks = chunks
 
         # 4. 构建或加载 FAISS
-        if REBUILD_INDEX or not Path(INDEX_DIR).exists():
+        if rebuild_index or not index_dir.exists():
             print("[RAG] 正在构建 FAISS 索引...")
             vectorstore = FAISS.from_documents(chunks, embeddings)
-            Path(INDEX_DIR).mkdir(parents=True, exist_ok=True)
-            vectorstore.save_local(INDEX_DIR)
-            with open(Path(INDEX_DIR) / "chunks.pkl", "wb") as f:
+            index_dir.mkdir(parents=True, exist_ok=True)
+            vectorstore.save_local(index_dir)
+            with open(index_dir / "chunks.pkl", "wb") as f:
                 pickle.dump(chunks, f)
-            print(f"[RAG] 向量索引已保存到 {INDEX_DIR}/")
+            print(f"[RAG] 向量索引已保存到 {index_dir}/")
 
         _loaded_vectorstore = FAISS.load_local(
-            INDEX_DIR,
+            index_dir,
             embeddings,
             allow_dangerous_deserialization=True,
         )
         print("[RAG] FAISS 索引加载完成")
 
         # 5. Reranker
-        if not DISABLE_RERANKER:
-            print(f"[RAG] 加载 Reranker 模型：{RERANKER_MODEL_NAME} ...")
-            _cross_encoder = HuggingFaceCrossEncoder(model_name=RERANKER_MODEL_NAME)
+        if not disable_reranker:
+            print(f"[RAG] 加载 Reranker 模型：{reranker_model_name} ...")
+            _cross_encoder = HuggingFaceCrossEncoder(model_name=reranker_model_name)
             print("[RAG] Reranker 加载完成")
         else:
             _cross_encoder = None
@@ -333,11 +349,13 @@ def _ensure_rag_initialized():
 
 def _get_adaptive_retriever(category: Optional[str] = None, hint_level: int = 0):
     _ensure_rag_initialized()
+    config = _resolve_runtime_config()
+    disable_reranker: bool = config["disable_reranker"]
 
     bucket = "high" if hint_level >= 2 else "low"
     fetch_k, top_n = _RETRIEVAL_PARAMS.get(category or "", {}).get(bucket, _DEFAULT_RETRIEVAL)
 
-    cache_key = (fetch_k, top_n, DISABLE_RERANKER)
+    cache_key = (fetch_k, top_n, disable_reranker)
     if cache_key in _retriever_cache:
         return _retriever_cache[cache_key]
 
@@ -350,7 +368,7 @@ def _get_adaptive_retriever(category: Optional[str] = None, hint_level: int = 0)
         fusion_k=fusion_k,
     )
 
-    if DISABLE_RERANKER or _cross_encoder is None:
+    if disable_reranker or _cross_encoder is None:
         result = _RRFRetriever(
             retrievers=hybrid.retrievers,
             weights=hybrid.weights,

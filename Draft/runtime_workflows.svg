@@ -1,0 +1,264 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1420" viewBox="0 0 1800 1420" role="img" aria-labelledby="title desc">
+  <title id="title">Socratic Agent Runtime Workflows</title>
+  <desc id="desc">Runtime workflow diagram for the socratic-agent project, including startup, chat, tool calling, OCR, persistence, and MCP sidecar access.</desc>
+  <defs>
+    <style>
+      text { font-family: "DejaVu Sans", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #16324f; }
+      .title { font-size: 30px; font-weight: 700; }
+      .subtitle { font-size: 15px; fill: #486581; }
+      .group-title { font-size: 22px; font-weight: 700; }
+      .label { font-size: 15px; font-weight: 600; }
+      .small { font-size: 13px; fill: #4f6b85; }
+      .tiny { font-size: 12px; fill: #627d98; }
+      .box { rx: 18; ry: 18; stroke-width: 2; }
+      .group { rx: 28; ry: 28; stroke-width: 2.5; stroke-dasharray: 10 8; }
+      .arrow { stroke: #334e68; stroke-width: 3; fill: none; marker-end: url(#arrowHead); }
+      .arrow-soft { stroke: #7b8794; stroke-width: 2.5; fill: none; marker-end: url(#arrowHeadSoft); }
+      .arrow-accent { stroke: #0f766e; stroke-width: 3.5; fill: none; marker-end: url(#arrowHeadAccent); }
+      .note-line { stroke: #9fb3c8; stroke-width: 2; fill: none; stroke-dasharray: 6 6; }
+    </style>
+    <marker id="arrowHead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334e68"/>
+    </marker>
+    <marker id="arrowHeadSoft" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7b8794"/>
+    </marker>
+    <marker id="arrowHeadAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e"/>
+    </marker>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#f8fbff"/>
+      <stop offset="100%" stop-color="#eef6f4"/>
+    </linearGradient>
+    <linearGradient id="startupFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#e0f2fe"/>
+      <stop offset="100%" stop-color="#dbeafe"/>
+    </linearGradient>
+    <linearGradient id="mainFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#ecfccb"/>
+      <stop offset="100%" stop-color="#dcfce7"/>
+    </linearGradient>
+    <linearGradient id="toolFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#fef3c7"/>
+      <stop offset="100%" stop-color="#fde68a"/>
+    </linearGradient>
+    <linearGradient id="persistFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#fce7f3"/>
+      <stop offset="100%" stop-color="#fae8ff"/>
+    </linearGradient>
+    <linearGradient id="mcpFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#ede9fe"/>
+      <stop offset="100%" stop-color="#ddd6fe"/>
+    </linearGradient>
+    <linearGradient id="dataFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#f1f5f9"/>
+      <stop offset="100%" stop-color="#e2e8f0"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#9fb3c8" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1800" height="1420" fill="url(#bg)"/>
+
+  <text x="72" y="66" class="title">Socratic Agent 运行时工作流程图</text>
+  <text x="72" y="95" class="subtitle">覆盖启动预热、聊天主链路、工具增强、OCR 图片输入、会话持久化，以及 MCP 旁路调用</text>
+
+  <rect x="52" y="126" width="1696" height="220" class="group" fill="#f4fbff" stroke="#8ecae6"/>
+  <text x="78" y="166" class="group-title">1. 启动与预热流程</text>
+
+  <rect x="90" y="202" width="220" height="92" class="box" fill="url(#startupFill)" stroke="#3b82f6" filter="url(#shadow)"/>
+  <text x="116" y="238" class="label">启动入口</text>
+  <text x="116" y="262" class="small">`uvicorn server:app`</text>
+  <text x="116" y="282" class="small">或 `streamlit run app_streamlit.py`</text>
+
+  <rect x="380" y="202" width="250" height="92" class="box" fill="url(#startupFill)" stroke="#2563eb" filter="url(#shadow)"/>
+  <text x="406" y="238" class="label">FastAPI lifespan</text>
+  <text x="406" y="262" class="small">决定开发模式后台预热</text>
+  <text x="406" y="282" class="small">或生产模式阻塞预热</text>
+
+  <rect x="700" y="202" width="300" height="92" class="box" fill="url(#startupFill)" stroke="#1d4ed8" filter="url(#shadow)"/>
+  <text x="726" y="238" class="label">RAG 初始化</text>
+  <text x="726" y="262" class="small">加载 Embedding / FAISS / chunks</text>
+  <text x="726" y="282" class="small">必要时从 `data/*.docx` 重建索引</text>
+
+  <rect x="1070" y="202" width="268" height="92" class="box" fill="url(#dataFill)" stroke="#64748b" filter="url(#shadow)"/>
+  <text x="1096" y="238" class="label">课程知识底座</text>
+  <text x="1096" y="262" class="small">`data/*.docx`</text>
+  <text x="1096" y="282" class="small">`faiss_index/` + `chunks.pkl`</text>
+
+  <rect x="1408" y="202" width="286" height="92" class="box" fill="url(#startupFill)" stroke="#0ea5e9" filter="url(#shadow)"/>
+  <text x="1434" y="238" class="label">服务可用</text>
+  <text x="1434" y="262" class="small">`/health` 立即可测</text>
+  <text x="1434" y="282" class="small">`/health/ready` 等待 RAG Ready</text>
+
+  <path d="M310 248 H380" class="arrow"/>
+  <path d="M630 248 H700" class="arrow"/>
+  <path d="M1000 248 H1070" class="arrow"/>
+  <path d="M1338 248 H1408" class="arrow"/>
+
+  <rect x="52" y="376" width="1696" height="510" class="group" fill="#f7fff7" stroke="#86efac"/>
+  <text x="78" y="416" class="group-title">2. 聊天主链路与工具增强流程</text>
+
+  <rect x="90" y="458" width="218" height="92" class="box" fill="url(#mainFill)" stroke="#16a34a" filter="url(#shadow)"/>
+  <text x="116" y="494" class="label">用户输入</text>
+  <text x="116" y="518" class="small">文本消息</text>
+  <text x="116" y="538" class="small">可附带图片与会话上下文</text>
+
+  <rect x="370" y="442" width="280" height="124" class="box" fill="url(#mainFill)" stroke="#15803d" filter="url(#shadow)"/>
+  <text x="396" y="478" class="label">接入层</text>
+  <text x="396" y="502" class="small">A. Streamlit 本地调用 `chat_once_stream()`</text>
+  <text x="396" y="524" class="small">B. FastAPI `/api/chat` 或 `/api/chat/stream`</text>
+  <text x="396" y="546" class="small">统一进入 `server.py`</text>
+
+  <rect x="710" y="442" width="280" height="124" class="box" fill="url(#mainFill)" stroke="#166534" filter="url(#shadow)"/>
+  <text x="736" y="478" class="label">会话与用户态装载</text>
+  <text x="736" y="502" class="small">鉴权、并发槽、session lock</text>
+  <text x="736" y="524" class="small">读取摘要、history、state</text>
+  <text x="736" y="546" class="small">必要时合成运行时上下文</text>
+
+  <rect x="1050" y="442" width="302" height="124" class="box" fill="url(#mainFill)" stroke="#15803d" filter="url(#shadow)"/>
+  <text x="1076" y="478" class="label">Agent 上下文准备</text>
+  <text x="1076" y="502" class="small">相关性分类 + 问题分类</text>
+  <text x="1076" y="524" class="small">Hint Level 决策 + 实验号识别</text>
+  <text x="1076" y="546" class="small">拼接 Prompt 与工具协议</text>
+
+  <rect x="1412" y="442" width="254" height="124" class="box" fill="url(#mainFill)" stroke="#166534" filter="url(#shadow)"/>
+  <text x="1438" y="478" class="label">LLM 调用</text>
+  <text x="1438" y="502" class="small">DeepSeek Chat</text>
+  <text x="1438" y="524" class="small">同步或流式 token 输出</text>
+  <text x="1438" y="546" class="small">可能直接答复，也可能发工具调用</text>
+
+  <rect x="1088" y="590" width="286" height="188" class="box" fill="url(#toolFill)" stroke="#d97706" filter="url(#shadow)"/>
+  <text x="1114" y="626" class="label">`agentic_rag/prompts.py`</text>
+  <text x="1114" y="650" class="small">统一分类 Prompt</text>
+  <text x="1114" y="672" class="small">4 类主 System Prompt</text>
+  <text x="1114" y="694" class="small">4 组 Hint Strategy</text>
+  <text x="1114" y="716" class="small">通用兜底 Prompt</text>
+  <text x="1114" y="740" class="small">规定 `tool_calls` 协议与输出结构</text>
+  <text x="1114" y="762" class="small">决定分类、路由、教学深度与话术边界</text>
+
+  <path d="M308 504 H370" class="arrow"/>
+  <path d="M650 504 H710" class="arrow"/>
+  <path d="M990 504 H1050" class="arrow"/>
+  <path d="M1352 504 H1412" class="arrow"/>
+  <path d="M1200 566 V590" class="arrow-soft"/>
+  <path d="M1374 684 C1422 684, 1432 638, 1454 638" class="arrow-soft"/>
+
+  <rect x="90" y="642" width="388" height="168" class="box" fill="url(#toolFill)" stroke="#d97706" filter="url(#shadow)"/>
+  <text x="116" y="678" class="label">工具调用检测</text>
+  <text x="116" y="702" class="small">LLM 若输出 `&lt;tool_calls&gt;` JSON 数组</text>
+  <text x="116" y="724" class="small">系统解析多个动作</text>
+  <text x="116" y="746" class="small">同轮内按工具并行执行</text>
+  <text x="116" y="768" class="small">将观察结果回灌给下一轮 Agent</text>
+
+  <rect x="536" y="626" width="248" height="92" class="box" fill="url(#toolFill)" stroke="#ca8a04" filter="url(#shadow)"/>
+  <text x="562" y="662" class="label">检索工具</text>
+  <text x="562" y="686" class="small">课程文档 RAG</text>
+  <text x="562" y="706" class="small">返回证据片段与 citations</text>
+
+  <rect x="536" y="738" width="248" height="92" class="box" fill="url(#toolFill)" stroke="#ca8a04" filter="url(#shadow)"/>
+  <text x="562" y="774" class="label">拓扑工具</text>
+  <text x="562" y="798" class="small">读取 `topo_store/&lt;lab&gt;/approved_json`</text>
+  <text x="562" y="818" class="small">返回结构化拓扑上下文</text>
+
+  <rect x="842" y="626" width="248" height="92" class="box" fill="url(#toolFill)" stroke="#ca8a04" filter="url(#shadow)"/>
+  <text x="868" y="662" class="label">搜索工具</text>
+  <text x="868" y="686" class="small">DuckDuckGo 外网搜索</text>
+  <text x="868" y="706" class="small">补充课程外信息</text>
+
+  <rect x="1128" y="798" width="268" height="92" class="box" fill="url(#dataFill)" stroke="#64748b" filter="url(#shadow)"/>
+  <text x="1154" y="834" class="label">知识与拓扑数据</text>
+  <text x="1154" y="858" class="small">`data/`、`faiss_index/`</text>
+  <text x="1154" y="878" class="small">`topo_store/approved_json`</text>
+
+  <rect x="1454" y="642" width="212" height="168" class="box" fill="url(#mainFill)" stroke="#15803d" filter="url(#shadow)"/>
+  <text x="1480" y="678" class="label">最终回答生成</text>
+  <text x="1480" y="702" class="small">工具结果汇总</text>
+  <text x="1480" y="724" class="small">附引用</text>
+  <text x="1480" y="746" class="small">流式或一次性返回用户</text>
+  <text x="1480" y="768" class="small">Thinking 可单独拆分展示</text>
+
+  <path d="M1412 566 C1360 594, 1248 618, 1090 650" class="arrow-accent"/>
+  <path d="M1412 566 C1280 622, 1040 640, 784 672" class="arrow-accent"/>
+  <path d="M1412 566 C1268 650, 956 764, 784 784" class="arrow-accent"/>
+  <path d="M478 726 H536" class="arrow"/>
+  <path d="M478 754 H500 C514 754, 514 784, 536 784" class="arrow"/>
+  <path d="M478 694 H820 C830 694, 830 672, 842 672" class="arrow"/>
+  <path d="M784 672 H1088" class="arrow-soft"/>
+  <path d="M784 784 H1088" class="arrow-soft"/>
+  <path d="M1090 672 H1088" class="arrow-soft"/>
+  <path d="M1200 778 V798" class="arrow-soft"/>
+  <path d="M784 672 C970 646, 1214 646, 1454 690" class="arrow"/>
+  <path d="M784 784 C1008 822, 1260 822, 1454 762" class="arrow"/>
+  <path d="M1090 672 C1216 672, 1330 686, 1454 714" class="arrow"/>
+
+  <rect x="52" y="914" width="1696" height="220" class="group" fill="#fffaf5" stroke="#f9a8d4"/>
+  <text x="78" y="954" class="group-title">3. OCR 图片输入与会话持久化流程</text>
+
+  <rect x="90" y="992" width="250" height="92" class="box" fill="url(#persistFill)" stroke="#db2777" filter="url(#shadow)"/>
+  <text x="116" y="1028" class="label">图片输入组件</text>
+  <text x="116" y="1052" class="small">`chat_input_images`</text>
+  <text x="116" y="1072" class="small">用户上传图片到 Streamlit</text>
+
+  <rect x="404" y="992" width="250" height="92" class="box" fill="url(#persistFill)" stroke="#c026d3" filter="url(#shadow)"/>
+  <text x="430" y="1028" class="label">OCR 识别</text>
+  <text x="430" y="1052" class="small">`describe_image()`</text>
+  <text x="430" y="1072" class="small">RapidOCR 提取图片文字</text>
+
+  <rect x="718" y="992" width="284" height="92" class="box" fill="url(#persistFill)" stroke="#a21caf" filter="url(#shadow)"/>
+  <text x="744" y="1028" class="label">消息增强</text>
+  <text x="744" y="1052" class="small">OCR 文本拼接进用户消息</text>
+  <text x="744" y="1072" class="small">再回到聊天主链路</text>
+
+  <rect x="1066" y="976" width="294" height="124" class="box" fill="url(#persistFill)" stroke="#be185d" filter="url(#shadow)"/>
+  <text x="1092" y="1012" class="label">会话回写</text>
+  <text x="1092" y="1036" class="small">保存 full history / last turns / state</text>
+  <text x="1092" y="1058" class="small">更新 summary / archived / title</text>
+  <text x="1092" y="1080" class="small">写入 SQLite `data_store/app.db`</text>
+
+  <rect x="1424" y="976" width="242" height="124" class="box" fill="url(#persistFill)" stroke="#9d174d" filter="url(#shadow)"/>
+  <text x="1450" y="1012" class="label">异步教学反馈</text>
+  <text x="1450" y="1036" class="small">记录 interaction metrics</text>
+  <text x="1450" y="1058" class="small">更新 proficiency score</text>
+  <text x="1450" y="1080" class="small">点赞/点踩写回</text>
+
+  <path d="M340 1038 H404" class="arrow"/>
+  <path d="M654 1038 H718" class="arrow"/>
+  <path d="M1002 1038 H1066" class="arrow"/>
+  <path d="M1360 1038 H1424" class="arrow"/>
+
+  <path d="M860 992 C860 930, 980 892, 1454 810" class="note-line"/>
+  <text x="876" y="928" class="tiny">OCR 只做前置文本化，随后仍走正常聊天流程</text>
+
+  <rect x="52" y="1162" width="1696" height="192" class="group" fill="#f7f5ff" stroke="#c4b5fd"/>
+  <text x="78" y="1202" class="group-title">4. MCP 旁路流程</text>
+
+  <rect x="90" y="1240" width="240" height="82" class="box" fill="url(#mcpFill)" stroke="#7c3aed" filter="url(#shadow)"/>
+  <text x="116" y="1274" class="label">MCP Client</text>
+  <text x="116" y="1296" class="small">Cursor / Claude Desktop</text>
+
+  <rect x="394" y="1240" width="252" height="82" class="box" fill="url(#mcpFill)" stroke="#6d28d9" filter="url(#shadow)"/>
+  <text x="420" y="1274" class="label">MCP Server</text>
+  <text x="420" y="1296" class="small">`python -m mcp_server.server`</text>
+
+  <rect x="710" y="1224" width="306" height="114" class="box" fill="url(#mcpFill)" stroke="#5b21b6" filter="url(#shadow)"/>
+  <text x="736" y="1260" class="label">MCP 工具集</text>
+  <text x="736" y="1284" class="small">`retrieve_course_docs`</text>
+  <text x="736" y="1306" class="small">`get_topology_context` / `list_available_experiments`</text>
+
+  <rect x="1080" y="1240" width="260" height="82" class="box" fill="url(#toolFill)" stroke="#ca8a04" filter="url(#shadow)"/>
+  <text x="1106" y="1274" class="label">直接复用 RAG / Topology</text>
+  <text x="1106" y="1296" class="small">不进入聊天编排主循环</text>
+
+  <rect x="1404" y="1240" width="262" height="82" class="box" fill="url(#dataFill)" stroke="#64748b" filter="url(#shadow)"/>
+  <text x="1430" y="1274" class="label">返回结构化结果</text>
+  <text x="1430" y="1296" class="small">供 IDE / Agent 外挂直接消费</text>
+
+  <path d="M330 1280 H394" class="arrow"/>
+  <path d="M646 1280 H710" class="arrow"/>
+  <path d="M1016 1280 H1080" class="arrow"/>
+  <path d="M1340 1280 H1404" class="arrow"/>
+
+  <text x="78" y="1390" class="subtitle">文件输出位置: /home/octopus/socratic-agent/Draft/runtime_workflows.svg</text>
+</svg>

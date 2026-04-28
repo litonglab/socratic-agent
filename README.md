@@ -108,6 +108,12 @@ uvicorn server:app --reload --port 8000
 streamlit run app_streamlit.py
 ```
 
+适合wsl的启动方法：
+```bash
+cd ~/socratic-agent
+bash scripts/start_wsl.sh
+```
+
 ## API 速查
 
 `server.py` 提供以下接口：

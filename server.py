@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
+# ✅ 尽早加载 env，避免后续导入的模块在 import 时拿到默认配置
+load_dotenv()
+
 # FastAPI 相关：保留，但不要在 import 时强制创建 app
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,9 +50,6 @@ from storage.user_store import (
     record_interaction_metric,
 )
 from storage.proficiency import update_proficiency_from_metric
-
-# ✅ 允许 Streamlit import 时也能加载 env
-load_dotenv()
 
 # -------------------------
 # Lazy / shared configs
@@ -139,6 +139,7 @@ class ChatRequest(BaseModel):
     debug: bool = False
     max_turns: int = 5
     enable_websearch: bool = True
+    allow_process_explanations: bool = True
 
 
 class ToolTrace(BaseModel):
@@ -530,6 +531,7 @@ def _handle_legacy_chat(req: ChatRequest) -> ChatResponse:
             state=state_dict,
             user_id=None,
             enable_websearch=req.enable_websearch,
+            allow_process_explanations=req.allow_process_explanations,
         )
 
         visible_reply, thinking = split_visible_and_thinking(raw_reply)
@@ -569,6 +571,7 @@ def _legacy_chat_stream_events(req: ChatRequest):
             state=state_dict,
             user_id=None,
             enable_websearch=req.enable_websearch,
+            allow_process_explanations=req.allow_process_explanations,
         ):
             if event["type"] == "token":
                 yield _sse_event("delta", {"content": event["content"]})
@@ -615,6 +618,7 @@ def _handle_chat(req: ChatRequest, user: Dict[str, Any]) -> ChatResponse:
             state=state_dict,
             user_id=user_id,
             enable_websearch=req.enable_websearch,
+            allow_process_explanations=req.allow_process_explanations,
         )
 
         visible_reply, thinking = split_visible_and_thinking(raw_reply)
@@ -674,6 +678,7 @@ def chat_once(
     debug: bool = False,
     max_turns: int = 5,
     enable_websearch: bool = True,
+    allow_process_explanations: bool = True,
 ) -> Dict[str, Any]:
     """
     Streamlit 直接调用：
@@ -690,6 +695,7 @@ def chat_once(
             debug=debug,
             max_turns=max_turns,
             enable_websearch=enable_websearch,
+            allow_process_explanations=allow_process_explanations,
         )
         resp = _handle_chat(req, user)
         return resp.dict()
@@ -706,6 +712,7 @@ def chat_once_stream(
     debug: bool = False,
     max_turns: int = 5,
     enable_websearch: bool = True,
+    allow_process_explanations: bool = True,
 ):
     """
     Streamlit 直接调用的流式版本。yield 字典：
@@ -745,6 +752,7 @@ def chat_once_stream(
                 state=state_dict,
                 user_id=user_id,
                 enable_websearch=enable_websearch,
+                allow_process_explanations=allow_process_explanations,
             ):
                 if event["type"] == "token":
                     yield {"type": "token", "content": event["content"]}
@@ -999,6 +1007,7 @@ def create_app() -> FastAPI:
                         state=state_dict,
                         user_id=user_id,
                         enable_websearch=req.enable_websearch,
+                        allow_process_explanations=req.allow_process_explanations,
                     ):
                         if event["type"] == "token":
                             yield _sse_event("delta", {"content": event["content"]})

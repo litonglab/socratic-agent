@@ -9,6 +9,17 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# 如果当前 shell 处于 conda 环境，先尽量退出，避免动态库和 PATH 污染。
+if [ -n "${CONDA_PREFIX:-}" ]; then
+  if command -v conda >/dev/null 2>&1; then
+    # conda 是 shell function 时，deactivate 会直接修改当前 shell 环境。
+    while [ -n "${CONDA_PREFIX:-}" ]; do
+      conda deactivate >/dev/null 2>&1 || break
+    done
+  fi
+  unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER CONDA_PYTHON_EXE CONDA_SHLVL
+fi
+
 if [ -f "$ROOT_DIR/.venv/bin/activate" ]; then
   # shellcheck disable=SC1091
   source "$ROOT_DIR/.venv/bin/activate"
@@ -29,6 +40,7 @@ export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export DISABLE_RERANKER="${DISABLE_RERANKER:-1}"
 export RAG_REBUILD_INDEX="${RAG_REBUILD_INDEX:-0}"
 export STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+unset LD_LIBRARY_PATH PYTHONPATH
 
 BACK_HOST="${BACK_HOST:-0.0.0.0}"
 BACK_PORT="${BACK_PORT:-8000}"

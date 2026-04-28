@@ -1,0 +1,198 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1360" viewBox="0 0 1800 1360" role="img" aria-labelledby="title desc">
+  <title id="title">prompts.py 功能角色图</title>
+  <desc id="desc">Shows how agentic_rag/prompts.py participates in runtime classification, routing, prompt assembly, tool protocol shaping, and highlights legacy prompts currently not wired directly.</desc>
+  <defs>
+    <style>
+      text { font-family: "DejaVu Sans", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #17324d; }
+      .title { font-size: 30px; font-weight: 700; }
+      .subtitle { font-size: 15px; fill: #537188; }
+      .section { font-size: 22px; font-weight: 700; }
+      .label { font-size: 16px; font-weight: 700; }
+      .small { font-size: 13px; fill: #4f6478; }
+      .tiny { font-size: 12px; fill: #6b7f92; }
+      .group { rx: 28; ry: 28; stroke-width: 2.4; stroke-dasharray: 10 8; }
+      .box { rx: 18; ry: 18; stroke-width: 2; }
+      .arrow { stroke: #355070; stroke-width: 3; fill: none; marker-end: url(#arrowHead); }
+      .arrow-soft { stroke: #7c8ea1; stroke-width: 2.3; fill: none; marker-end: url(#arrowHeadSoft); }
+      .arrow-accent { stroke: #0f766e; stroke-width: 3.2; fill: none; marker-end: url(#arrowHeadAccent); }
+      .note-line { stroke: #94a3b8; stroke-width: 2; fill: none; stroke-dasharray: 6 6; }
+    </style>
+    <marker id="arrowHead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#355070"/>
+    </marker>
+    <marker id="arrowHeadSoft" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c8ea1"/>
+    </marker>
+    <marker id="arrowHeadAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e"/>
+    </marker>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#f8fbff"/>
+      <stop offset="100%" stop-color="#f8fafc"/>
+    </linearGradient>
+    <linearGradient id="catalogFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#e0f2fe"/>
+      <stop offset="100%" stop-color="#dbeafe"/>
+    </linearGradient>
+    <linearGradient id="runtimeFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#ecfccb"/>
+      <stop offset="100%" stop-color="#dcfce7"/>
+    </linearGradient>
+    <linearGradient id="assemblyFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#fef3c7"/>
+      <stop offset="100%" stop-color="#fde68a"/>
+    </linearGradient>
+    <linearGradient id="effectFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#fce7f3"/>
+      <stop offset="100%" stop-color="#fae8ff"/>
+    </linearGradient>
+    <linearGradient id="legacyFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#f1f5f9"/>
+      <stop offset="100%" stop-color="#e2e8f0"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#94a3b8" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1800" height="1360" fill="url(#bg)"/>
+
+  <text x="70" y="64" class="title">`agentic_rag/prompts.py` 功能角色图</text>
+  <text x="70" y="93" class="subtitle">围绕当前运行时接线关系：分类、路由、教学策略注入、工具协议约束，以及未直接启用的旧 Prompt</text>
+
+  <rect x="52" y="126" width="1696" height="248" class="group" fill="#f3fbff" stroke="#93c5fd"/>
+  <text x="78" y="166" class="section">A. prompts.py 内部资产</text>
+
+  <rect x="88" y="206" width="268" height="120" class="box" fill="url(#catalogFill)" stroke="#2563eb" filter="url(#shadow)"/>
+  <text x="114" y="242" class="label">统一分类 Prompt</text>
+  <text x="114" y="266" class="small">`UNIFIED_CLASSIFICATION_PROMPT`</text>
+  <text x="114" y="288" class="small">一次完成相关性 / 分类 / hint 判断</text>
+  <text x="114" y="310" class="small">当前运行时真正使用</text>
+
+  <rect x="398" y="190" width="314" height="152" class="box" fill="url(#catalogFill)" stroke="#1d4ed8" filter="url(#shadow)"/>
+  <text x="424" y="226" class="label">4 个主 System Prompt</text>
+  <text x="424" y="250" class="small">`BASE_PROMPT_LAB`</text>
+  <text x="424" y="272" class="small">`BASE_PROMPT_THEORY`</text>
+  <text x="424" y="294" class="small">`BASE_PROMPT_REVIEW`</text>
+  <text x="424" y="316" class="small">`BASE_PROMPT_CALC`</text>
+
+  <rect x="754" y="190" width="314" height="152" class="box" fill="url(#catalogFill)" stroke="#1d4ed8" filter="url(#shadow)"/>
+  <text x="780" y="226" class="label">4 组教学策略模板</text>
+  <text x="780" y="250" class="small">`STRATEGY_LAB`</text>
+  <text x="780" y="272" class="small">`STRATEGY_THEORY`</text>
+  <text x="780" y="294" class="small">`STRATEGY_REVIEW`</text>
+  <text x="780" y="316" class="small">`STRATEGY_CALC`</text>
+
+  <rect x="1110" y="206" width="270" height="120" class="box" fill="url(#catalogFill)" stroke="#2563eb" filter="url(#shadow)"/>
+  <text x="1136" y="242" class="label">通用兜底 Prompt</text>
+  <text x="1136" y="266" class="small">`BASE_PROMPT_GENERAL`</text>
+  <text x="1136" y="288" class="small">处理课程无关问题</text>
+  <text x="1136" y="310" class="small">当前运行时使用</text>
+
+  <rect x="1422" y="190" width="286" height="152" class="box" fill="url(#legacyFill)" stroke="#64748b" filter="url(#shadow)"/>
+  <text x="1448" y="226" class="label">旧拆分式 Prompt</text>
+  <text x="1448" y="250" class="small">`RELEVANCE_PROMPT`</text>
+  <text x="1448" y="272" class="small">`CATEGORY_DETECT_PROMPT`</text>
+  <text x="1448" y="294" class="small">`HINT_JUDGE_PROMPT`</text>
+  <text x="1448" y="316" class="small">文件中存在，但当前未被直接调用</text>
+
+  <rect x="52" y="404" width="1696" height="396" class="group" fill="#f7fff7" stroke="#86efac"/>
+  <text x="78" y="444" class="section">B. prompts.py 如何进入运行时主链路</text>
+
+  <rect x="88" y="492" width="232" height="96" class="box" fill="url(#runtimeFill)" stroke="#16a34a" filter="url(#shadow)"/>
+  <text x="114" y="528" class="label">用户问题</text>
+  <text x="114" y="552" class="small">携带 history 与 state</text>
+  <text x="114" y="572" class="small">进入 `query()` / `query_stream()`</text>
+
+  <rect x="376" y="492" width="282" height="96" class="box" fill="url(#runtimeFill)" stroke="#15803d" filter="url(#shadow)"/>
+  <text x="402" y="528" class="label">agent.py 导入 prompts.py</text>
+  <text x="402" y="552" class="small">建立 `_BASE_PROMPTS` 映射</text>
+  <text x="402" y="572" class="small">建立 `_STRATEGIES` 映射</text>
+
+  <rect x="714" y="476" width="308" height="128" class="box" fill="url(#runtimeFill)" stroke="#166534" filter="url(#shadow)"/>
+  <text x="740" y="512" class="label">分类阶段</text>
+  <text x="740" y="536" class="small">`classify_unified()` 把</text>
+  <text x="740" y="558" class="small">`UNIFIED_CLASSIFICATION_PROMPT`</text>
+  <text x="740" y="580" class="small">发给 LLM，拿回 relevance / category / hint_decision</text>
+
+  <rect x="1078" y="476" width="276" height="128" class="box" fill="url(#runtimeFill)" stroke="#15803d" filter="url(#shadow)"/>
+  <text x="1104" y="512" class="label">路由决策</text>
+  <text x="1104" y="536" class="small">无关问题 → `BASE_PROMPT_GENERAL`</text>
+  <text x="1104" y="558" class="small">相关问题 → 4 类主 Prompt 之一</text>
+  <text x="1104" y="580" class="small">并据此决定回答风格</text>
+
+  <rect x="1410" y="476" width="298" height="128" class="box" fill="url(#runtimeFill)" stroke="#166534" filter="url(#shadow)"/>
+  <text x="1436" y="512" class="label">Hint Level 绑定</text>
+  <text x="1436" y="536" class="small">按 category + level</text>
+  <text x="1436" y="558" class="small">从 `STRATEGY_*` 中挑出一段策略文字</text>
+  <text x="1436" y="580" class="small">再嵌进最终 System Prompt</text>
+
+  <path d="M320 540 H376" class="arrow"/>
+  <path d="M658 540 H714" class="arrow"/>
+  <path d="M1022 540 H1078" class="arrow"/>
+  <path d="M1354 540 H1410" class="arrow"/>
+
+  <rect x="190" y="644" width="368" height="112" class="box" fill="url(#legacyFill)" stroke="#94a3b8" filter="url(#shadow)"/>
+  <text x="216" y="680" class="label">说明：旧 Prompt 为什么没走这里</text>
+  <text x="216" y="704" class="small">当前代码已把相关性、分类、hint 三件事</text>
+  <text x="216" y="726" class="small">合并进 `UNIFIED_CLASSIFICATION_PROMPT`</text>
+  <text x="216" y="748" class="small">因此旧三段 Prompt 没有直接调用点</text>
+
+  <path d="M1564 342 C1564 400, 420 398, 420 644" class="note-line"/>
+  <text x="1276" y="392" class="tiny">文件里有，但被统一分类 Prompt 取代</text>
+
+  <rect x="52" y="828" width="1696" height="336" class="group" fill="#fffaf3" stroke="#fcd34d"/>
+  <text x="78" y="868" class="section">C. prompts.py 对最终回答的实际影响</text>
+
+  <rect x="88" y="920" width="320" height="172" class="box" fill="url(#assemblyFill)" stroke="#d97706" filter="url(#shadow)"/>
+  <text x="114" y="956" class="label">1. 约束输出结构</text>
+  <text x="114" y="980" class="small">主 Prompt 明确要求：</text>
+  <text x="114" y="1002" class="small">先输出 `&lt;思考&gt;...&lt;/思考&gt;`</text>
+  <text x="114" y="1024" class="small">工具调用用 `&lt;tool_calls&gt;...&lt;/tool_calls&gt;`</text>
+  <text x="114" y="1046" class="small">学生可见区不暴露内部证据标记</text>
+  <text x="114" y="1068" class="small">这直接决定了后端如何解析工具动作</text>
+
+  <rect x="444" y="920" width="320" height="172" class="box" fill="url(#assemblyFill)" stroke="#ca8a04" filter="url(#shadow)"/>
+  <text x="470" y="956" class="label">2. 约束工具使用顺序</text>
+  <text x="470" y="980" class="small">不同类别 Prompt 都写了：</text>
+  <text x="470" y="1002" class="small">什么时候优先检索、什么时候查拓扑</text>
+  <text x="470" y="1024" class="small">什么时候才允许搜索</text>
+  <text x="470" y="1046" class="small">这影响 LLM 选择调用哪种工具</text>
+  <text x="470" y="1068" class="small">以及工具调用后的解释框架</text>
+
+  <rect x="800" y="920" width="320" height="172" class="box" fill="url(#assemblyFill)" stroke="#ca8a04" filter="url(#shadow)"/>
+  <text x="826" y="956" class="label">3. 约束教学语气与深度</text>
+  <text x="826" y="980" class="small">`STRATEGY_*` 决定是否只给方向</text>
+  <text x="826" y="1002" class="small">还是解释机制、给修复路径、给完整命令</text>
+  <text x="826" y="1024" class="small">本质上它控制“同一个事实如何说”</text>
+  <text x="826" y="1046" class="small">而不是控制“取什么事实”</text>
+  <text x="826" y="1068" class="small">所以它是教学风格总开关</text>
+
+  <rect x="1156" y="920" width="268" height="172" class="box" fill="url(#effectFill)" stroke="#c026d3" filter="url(#shadow)"/>
+  <text x="1182" y="956" class="label">4. 动态拼装入口</text>
+  <text x="1182" y="980" class="small">主 Prompt 不是静态原样发出</text>
+  <text x="1182" y="1002" class="small">运行时还会追加：</text>
+  <text x="1182" y="1024" class="small">实验上下文、次要分类任务</text>
+  <text x="1182" y="1046" class="small">学生水平摘要、工具描述表</text>
+  <text x="1182" y="1068" class="small">因此 prompts.py 是“骨架”而非完整成品</text>
+
+  <rect x="1460" y="920" width="248" height="172" class="box" fill="url(#effectFill)" stroke="#a21caf" filter="url(#shadow)"/>
+  <text x="1486" y="956" class="label">5. 影响解析与回显</text>
+  <text x="1486" y="980" class="small">因为 Prompt 规定内部/外部双区块</text>
+  <text x="1486" y="1002" class="small">后端才能拆出 visible / thinking</text>
+  <text x="1486" y="1024" class="small">Streamlit 才能把 Thinking 折叠显示</text>
+  <text x="1486" y="1046" class="small">并把工具 trace 与引用分离管理</text>
+
+  <path d="M1216 604 V680 C1216 710, 248 710, 248 920" class="arrow-soft"/>
+  <path d="M1216 604 V696 C1216 736, 604 736, 604 920" class="arrow-soft"/>
+  <path d="M1559 604 V724 C1559 770, 960 770, 960 920" class="arrow-soft"/>
+  <path d="M1216 604 V744 C1216 790, 1290 790, 1290 920" class="arrow-soft"/>
+  <path d="M1559 604 V764 C1559 808, 1584 808, 1584 920" class="arrow-soft"/>
+
+  <rect x="52" y="1190" width="1696" height="126" class="group" fill="#fdfdfd" stroke="#cbd5e1"/>
+  <text x="78" y="1230" class="section">D. 一句话总结</text>
+  <text x="110" y="1272" class="label">`prompts.py` 不是知识库，也不是工具实现层；它是 Agent 的“行为宪法”。</text>
+  <text x="110" y="1298" class="small">它决定先怎么判断问题、选哪种人格和教学深度、是否推动工具调用，以及最终回答必须长成什么结构。</text>
+
+  <text x="70" y="1342" class="subtitle">文件输出位置: /home/octopus/socratic-agent/Draft/prompts_py_role_map.svg</text>
+</svg>

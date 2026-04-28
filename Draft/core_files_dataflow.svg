@@ -1,0 +1,383 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1820" viewBox="0 0 2200 1820" role="img" aria-labelledby="title desc">
+  <title id="title">Socratic Agent Core Files Data Flow</title>
+  <desc id="desc">Complete data flow diagram across core files and internal modules in the socratic-agent project.</desc>
+  <defs>
+    <style>
+      text { font-family: "DejaVu Sans", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #16324f; }
+      .title { font-size: 30px; font-weight: 700; }
+      .subtitle { font-size: 15px; fill: #486581; }
+      .section { font-size: 21px; font-weight: 700; }
+      .file { font-size: 18px; font-weight: 700; }
+      .label { font-size: 14px; font-weight: 700; }
+      .small { font-size: 12px; fill: #4f6b85; }
+      .tiny { font-size: 11px; fill: #6b7c93; }
+      .group { rx: 28; ry: 28; stroke-width: 2.4; stroke-dasharray: 10 8; }
+      .box { rx: 16; ry: 16; stroke-width: 2; }
+      .arrow { stroke: #334e68; stroke-width: 3; fill: none; marker-end: url(#arrowHead); }
+      .arrow-soft { stroke: #7b8794; stroke-width: 2.2; fill: none; marker-end: url(#arrowHeadSoft); }
+      .arrow-accent { stroke: #0f766e; stroke-width: 3.2; fill: none; marker-end: url(#arrowHeadAccent); }
+      .note-line { stroke: #94a3b8; stroke-width: 2; fill: none; stroke-dasharray: 6 6; }
+    </style>
+    <marker id="arrowHead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334e68"/>
+    </marker>
+    <marker id="arrowHeadSoft" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7b8794"/>
+    </marker>
+    <marker id="arrowHeadAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e"/>
+    </marker>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#f8fbff"/>
+      <stop offset="100%" stop-color="#f7fbf8"/>
+    </linearGradient>
+    <linearGradient id="uiFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#e0f2fe"/>
+      <stop offset="100%" stop-color="#dbeafe"/>
+    </linearGradient>
+    <linearGradient id="serverFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#ecfccb"/>
+      <stop offset="100%" stop-color="#dcfce7"/>
+    </linearGradient>
+    <linearGradient id="agentFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#fef3c7"/>
+      <stop offset="100%" stop-color="#fde68a"/>
+    </linearGradient>
+    <linearGradient id="toolFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#fce7f3"/>
+      <stop offset="100%" stop-color="#fae8ff"/>
+    </linearGradient>
+    <linearGradient id="storageFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#ede9fe"/>
+      <stop offset="100%" stop-color="#ddd6fe"/>
+    </linearGradient>
+    <linearGradient id="dataFill" x1="0" x2="1">
+      <stop offset="0%" stop-color="#f1f5f9"/>
+      <stop offset="100%" stop-color="#e2e8f0"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#94a3b8" flood-opacity="0.34"/>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="2200" height="1820" fill="url(#bg)"/>
+
+  <text x="70" y="60" class="title">核心文件及内部模块完整数据流图</text>
+  <text x="70" y="88" class="subtitle">覆盖 UI、本地调用与 HTTP 接入、Agent 编排、RAG/拓扑/OCR/搜索、鉴权与会话持久化、MCP 旁路</text>
+
+  <rect x="50" y="118" width="2100" height="146" class="group" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="76" y="156" class="section">图例</text>
+  <rect x="170" y="132" width="100" height="28" class="box" fill="url(#uiFill)" stroke="#3b82f6"/>
+  <text x="282" y="151" class="small">前端 / 接入文件</text>
+  <rect x="424" y="132" width="100" height="28" class="box" fill="url(#serverFill)" stroke="#16a34a"/>
+  <text x="536" y="151" class="small">服务编排文件</text>
+  <rect x="690" y="132" width="100" height="28" class="box" fill="url(#agentFill)" stroke="#d97706"/>
+  <text x="802" y="151" class="small">Agent / Prompt 选择</text>
+  <rect x="1022" y="132" width="100" height="28" class="box" fill="url(#toolFill)" stroke="#c026d3"/>
+  <text x="1134" y="151" class="small">工具实现文件</text>
+  <rect x="1322" y="132" width="100" height="28" class="box" fill="url(#storageFill)" stroke="#7c3aed"/>
+  <text x="1434" y="151" class="small">鉴权 / 会话 / 评分</text>
+  <rect x="1646" y="132" width="100" height="28" class="box" fill="url(#dataFill)" stroke="#64748b"/>
+  <text x="1758" y="151" class="small">数据文件 / 外部资源</text>
+  <path d="M172 204 H274" class="arrow"/>
+  <text x="288" y="208" class="small">主数据流</text>
+  <path d="M440 204 H542" class="arrow-accent"/>
+  <text x="556" y="208" class="small">工具调用 / 异步影响</text>
+  <path d="M760 204 H862" class="arrow-soft"/>
+  <text x="876" y="208" class="small">辅助 / 旁路 / 配置依赖</text>
+
+  <rect x="50" y="292" width="480" height="1246" class="group" fill="#f6fbff" stroke="#93c5fd"/>
+  <text x="76" y="332" class="section">1. 前端与接入层</text>
+
+  <rect x="82" y="360" width="418" height="520" class="box" fill="url(#uiFill)" stroke="#2563eb" filter="url(#shadow)"/>
+  <text x="108" y="396" class="file">app_streamlit.py</text>
+  <rect x="108" y="422" width="170" height="88" class="box" fill="#ffffff" stroke="#60a5fa"/>
+  <text x="126" y="455" class="label">Auth UI</text>
+  <text x="126" y="478" class="small">`login_user()`</text>
+  <text x="126" y="496" class="small">`register_user()`</text>
+  <rect x="302" y="422" width="170" height="88" class="box" fill="#ffffff" stroke="#60a5fa"/>
+  <text x="320" y="455" class="label">Session UI</text>
+  <text x="320" y="478" class="small">`_load_user_sessions()`</text>
+  <text x="320" y="496" class="small">`_persist_current_user_sessions()`</text>
+  <rect x="108" y="534" width="170" height="116" class="box" fill="#ffffff" stroke="#60a5fa"/>
+  <text x="126" y="567" class="label">Image Path</text>
+  <text x="126" y="590" class="small">`chat_input_images`</text>
+  <text x="126" y="608" class="small">`describe_image()`</text>
+  <text x="126" y="626" class="small">OCR text joins user message</text>
+  <rect x="302" y="534" width="170" height="116" class="box" fill="#ffffff" stroke="#60a5fa"/>
+  <text x="320" y="567" class="label">Chat Render</text>
+  <text x="320" y="590" class="small">`chat_once_stream()`</text>
+  <text x="320" y="608" class="small">token loop / Thinking panel</text>
+  <text x="320" y="626" class="small">feedback submit</text>
+  <rect x="108" y="674" width="364" height="168" class="box" fill="#ffffff" stroke="#60a5fa"/>
+  <text x="126" y="707" class="label">UI-local persisted state</text>
+  <text x="126" y="730" class="small">`sessions.json` only stores lightweight UI state</text>
+  <text x="126" y="748" class="small">active_session_id / local session shell</text>
+  <text x="126" y="766" class="small">authoritative chat content still comes from backend DB</text>
+  <text x="126" y="790" class="tiny">This file calls server functions directly, not localhost HTTP.</text>
+
+  <rect x="82" y="916" width="418" height="280" class="box" fill="url(#serverFill)" stroke="#16a34a" filter="url(#shadow)"/>
+  <text x="108" y="952" class="file">server.py as local function facade</text>
+  <rect x="108" y="980" width="170" height="88" class="box" fill="#ffffff" stroke="#86efac"/>
+  <text x="126" y="1013" class="label">Local chat API</text>
+  <text x="126" y="1036" class="small">`chat_once_stream()`</text>
+  <text x="126" y="1054" class="small">meta/token/done events</text>
+  <rect x="302" y="980" width="170" height="88" class="box" fill="#ffffff" stroke="#86efac"/>
+  <text x="320" y="1013" class="label">Local session API</text>
+  <text x="320" y="1036" class="small">`load_user_session_cache()`</text>
+  <text x="320" y="1054" class="small">archive/delete/clear</text>
+  <rect x="108" y="1092" width="364" height="76" class="box" fill="#ffffff" stroke="#86efac"/>
+  <text x="126" y="1125" class="label">Local auth / feedback API</text>
+  <text x="126" y="1148" class="small">`register_user()` / `login_user()` / `submit_feedback()`</text>
+
+  <rect x="82" y="1232" width="418" height="264" class="box" fill="url(#uiFill)" stroke="#0ea5e9" filter="url(#shadow)"/>
+  <text x="108" y="1268" class="file">FastAPI / external client entry</text>
+  <rect x="108" y="1298" width="364" height="76" class="box" fill="#ffffff" stroke="#67e8f9"/>
+  <text x="126" y="1331" class="label">`create_app()` endpoints</text>
+  <text x="126" y="1354" class="small">`/api/register` `/api/login` `/api/chat` `/api/chat/stream` `/api/sessions*`</text>
+  <rect x="108" y="1398" width="364" height="62" class="box" fill="#ffffff" stroke="#67e8f9"/>
+  <text x="126" y="1430" class="label">SSE path</text>
+  <text x="126" y="1452" class="small">`_sse_event()` packages `meta` `delta` `done` `error`</text>
+
+  <rect x="572" y="292" width="620" height="1246" class="group" fill="#f8fff5" stroke="#86efac"/>
+  <text x="598" y="332" class="section">2. server.py 与 agent.py 主链路</text>
+
+  <rect x="604" y="360" width="556" height="494" class="box" fill="url(#serverFill)" stroke="#15803d" filter="url(#shadow)"/>
+  <text x="630" y="396" class="file">server.py</text>
+  <rect x="630" y="424" width="240" height="100" class="box" fill="#ffffff" stroke="#86efac"/>
+  <text x="648" y="458" class="label">Request normalization</text>
+  <text x="648" y="481" class="small">`_require_user_by_token()`</text>
+  <text x="648" y="499" class="small">`_sanitize_history_dicts()`</text>
+  <rect x="896" y="424" width="240" height="100" class="box" fill="#ffffff" stroke="#86efac"/>
+  <text x="914" y="458" class="label">Session context load</text>
+  <text x="914" y="481" class="small">`get_session()`</text>
+  <text x="914" y="499" class="small">`_choose_history_context()`</text>
+  <rect x="630" y="548" width="240" height="108" class="box" fill="#ffffff" stroke="#86efac"/>
+  <text x="648" y="582" class="label">Chat execution</text>
+  <text x="648" y="605" class="small">`_handle_chat()` / `_handle_legacy_chat()`</text>
+  <text x="648" y="623" class="small">or `chat_once_stream()`</text>
+  <rect x="896" y="548" width="240" height="108" class="box" fill="#ffffff" stroke="#86efac"/>
+  <text x="914" y="582" class="label">Agent bridge</text>
+  <text x="914" y="605" class="small">`dicts_to_messages()`</text>
+  <text x="914" y="623" class="small">call `query()` / `query_stream()`</text>
+  <rect x="630" y="680" width="240" height="138" class="box" fill="#ffffff" stroke="#86efac"/>
+  <text x="648" y="714" class="label">Response shaping</text>
+  <text x="648" y="737" class="small">`split_visible_and_thinking()`</text>
+  <text x="648" y="755" class="small">`_build_session_history_records()`</text>
+  <text x="648" y="773" class="small">`_finalize_history()`</text>
+  <rect x="896" y="680" width="240" height="138" class="box" fill="#ffffff" stroke="#86efac"/>
+  <text x="914" y="714" class="label">Persistence fan-out</text>
+  <text x="914" y="737" class="small">`_persist_session_snapshot()`</text>
+  <text x="914" y="755" class="small">`_persist_session_summary()`</text>
+  <text x="914" y="773" class="small">`_persist_chat_async()`</text>
+
+  <rect x="604" y="894" width="556" height="604" class="box" fill="url(#agentFill)" stroke="#d97706" filter="url(#shadow)"/>
+  <text x="630" y="930" class="file">agentic_rag/agent.py</text>
+  <rect x="630" y="958" width="240" height="104" class="box" fill="#ffffff" stroke="#fbbf24"/>
+  <text x="648" y="992" class="label">Classification</text>
+  <text x="648" y="1015" class="small">`classify_unified()`</text>
+  <text x="648" y="1033" class="small">LLM returns relevance/category/hint</text>
+  <rect x="896" y="958" width="240" height="104" class="box" fill="#ffffff" stroke="#fbbf24"/>
+  <text x="914" y="992" class="label">Context assembly</text>
+  <text x="914" y="1015" class="small">`_prepare_context()`</text>
+  <text x="914" y="1033" class="small">Prompt + experiment + student level</text>
+  <rect x="630" y="1088" width="240" height="116" class="box" fill="#ffffff" stroke="#fbbf24"/>
+  <text x="648" y="1122" class="label">Prompt sources</text>
+  <text x="648" y="1145" class="small">`prompts.py` base prompts</text>
+  <text x="648" y="1163" class="small">`prompts.py` strategy templates</text>
+  <text x="648" y="1181" class="small">`BASE_PROMPT_GENERAL` fallback</text>
+  <rect x="896" y="1088" width="240" height="116" class="box" fill="#ffffff" stroke="#fbbf24"/>
+  <text x="914" y="1122" class="label">LLM loop</text>
+  <text x="914" y="1145" class="small">`Agent.execute()` / `execute_stream()`</text>
+  <text x="914" y="1163" class="small">`query()` / `query_stream()`</text>
+  <text x="914" y="1181" class="small">multi-turn until no tool call</text>
+  <rect x="630" y="1230" width="240" height="140" class="box" fill="#ffffff" stroke="#fbbf24"/>
+  <text x="648" y="1264" class="label">Tool call parser</text>
+  <text x="648" y="1287" class="small">`_find_actions()`</text>
+  <text x="648" y="1305" class="small">`_find_actions_in_stream_buffer()`</text>
+  <text x="648" y="1323" class="small">parses `&lt;tool_calls&gt;` JSON</text>
+  <text x="648" y="1341" class="small">dedupe max 5 actions</text>
+  <rect x="896" y="1230" width="240" height="140" class="box" fill="#ffffff" stroke="#fbbf24"/>
+  <text x="914" y="1264" class="label">Tool execution adapter</text>
+  <text x="914" y="1287" class="small">`_execute_tool_action()`</text>
+  <text x="914" y="1305" class="small">`_execute_tool_actions()`</text>
+  <text x="914" y="1323" class="small">collect tool_traces + citations</text>
+  <text x="914" y="1341" class="small">feeds observation back into LLM</text>
+  <rect x="630" y="1396" width="506" height="74" class="box" fill="#ffffff" stroke="#fbbf24"/>
+  <text x="648" y="1428" class="label">Final agent outputs</text>
+  <text x="648" y="1451" class="small">`result` + `history` + `tool_traces` + mutated `state` return to `server.py`</text>
+  <rect x="1234" y="292" width="510" height="1246" class="group" fill="#fff8ff" stroke="#f9a8d4"/>
+  <text x="1260" y="332" class="section">3. Prompt 与工具实现层</text>
+
+  <rect x="1264" y="360" width="450" height="212" class="box" fill="url(#agentFill)" stroke="#d97706" filter="url(#shadow)"/>
+  <text x="1290" y="396" class="file">agentic_rag/prompts.py</text>
+  <rect x="1290" y="424" width="184" height="102" class="box" fill="#ffffff" stroke="#fbbf24"/>
+  <text x="1308" y="457" class="label">Classification prompts</text>
+  <text x="1308" y="480" class="small">`UNIFIED_CLASSIFICATION_PROMPT`</text>
+  <text x="1308" y="498" class="small">old split prompts also live here</text>
+  <rect x="1500" y="424" width="188" height="102" class="box" fill="#ffffff" stroke="#fbbf24"/>
+  <text x="1518" y="457" class="label">Response prompts</text>
+  <text x="1518" y="480" class="small">`BASE_PROMPT_*`</text>
+  <text x="1518" y="498" class="small">`STRATEGY_*` + `BASE_PROMPT_GENERAL`</text>
+
+  <rect x="1264" y="604" width="450" height="254" class="box" fill="url(#toolFill)" stroke="#c026d3" filter="url(#shadow)"/>
+  <text x="1290" y="640" class="file">agentic_rag/rag.py</text>
+  <rect x="1290" y="668" width="188" height="86" class="box" fill="#ffffff" stroke="#f0abfc"/>
+  <text x="1308" y="701" class="label">Init path</text>
+  <text x="1308" y="724" class="small">`_ensure_rag_initialized()`</text>
+  <text x="1308" y="742" class="small">load/build FAISS + chunks</text>
+  <rect x="1504" y="668" width="184" height="86" class="box" fill="#ffffff" stroke="#f0abfc"/>
+  <text x="1522" y="701" class="label">Adaptive retriever</text>
+  <text x="1522" y="724" class="small">`_get_adaptive_retriever()`</text>
+  <text x="1522" y="742" class="small">category + hint_level aware</text>
+  <rect x="1290" y="778" width="398" height="60" class="box" fill="#ffffff" stroke="#f0abfc"/>
+  <text x="1308" y="812" class="label">Runtime API: `retrieve_course_docs()` / `RAGAgent()` -> numbered context + citations</text>
+
+  <rect x="1264" y="890" width="450" height="222" class="box" fill="url(#toolFill)" stroke="#db2777" filter="url(#shadow)"/>
+  <text x="1290" y="926" class="file">agentic_rag/topo_rag.py</text>
+  <rect x="1290" y="954" width="190" height="86" class="box" fill="#ffffff" stroke="#f9a8d4"/>
+  <text x="1308" y="987" class="label">Runtime loader</text>
+  <text x="1308" y="1010" class="small">`LoadTopoRetriever()`</text>
+  <text x="1308" y="1028" class="small">resolve experiment + approved_json</text>
+  <rect x="1504" y="954" width="184" height="86" class="box" fill="#ffffff" stroke="#f9a8d4"/>
+  <text x="1522" y="987" class="label">Runtime API</text>
+  <text x="1522" y="1010" class="small">`TopoRetriever()`</text>
+  <text x="1522" y="1028" class="small">returns textual topology context</text>
+  <rect x="1290" y="1064" width="398" height="30" class="box" fill="#ffffff" stroke="#f9a8d4"/>
+  <text x="1308" y="1084" class="small">Separate build pipeline also exists for extracting topology store from docx images.</text>
+
+  <rect x="1264" y="1144" width="214" height="170" class="box" fill="url(#toolFill)" stroke="#c026d3" filter="url(#shadow)"/>
+  <text x="1290" y="1180" class="file">agentic_rag/web_search.py</text>
+  <text x="1290" y="1213" class="label">`WebSearch()`</text>
+  <text x="1290" y="1236" class="small">lazy DuckDuckGo wrapper</text>
+  <text x="1290" y="1254" class="small">used only when enabled</text>
+  <text x="1290" y="1272" class="small">and model chooses `搜索` tool</text>
+
+  <rect x="1500" y="1144" width="214" height="170" class="box" fill="url(#toolFill)" stroke="#db2777" filter="url(#shadow)"/>
+  <text x="1526" y="1180" class="file">agentic_rag/vision.py</text>
+  <text x="1526" y="1213" class="label">`describe_image()`</text>
+  <text x="1526" y="1236" class="small">lazy RapidOCR init</text>
+  <text x="1526" y="1254" class="small">image bytes -> OCR text</text>
+  <text x="1526" y="1272" class="small">called from Streamlit before chat</text>
+
+  <rect x="1264" y="1346" width="450" height="152" class="box" fill="url(#toolFill)" stroke="#a21caf" filter="url(#shadow)"/>
+  <text x="1290" y="1382" class="file">agentic_rag/llm_config.py</text>
+  <rect x="1290" y="1410" width="398" height="58" class="box" fill="#ffffff" stroke="#e879f9"/>
+  <text x="1308" y="1443" class="label">`build_chat_llm()` -> `DeepSeekChatClient` (`invoke` / `invoke_stream`)</text>
+
+  <rect x="1784" y="292" width="366" height="1246" class="group" fill="#faf7ff" stroke="#c4b5fd"/>
+  <text x="1810" y="332" class="section">4. 鉴权 / 存储 / 评分 / MCP</text>
+
+  <rect x="1814" y="360" width="306" height="170" class="box" fill="url(#storageFill)" stroke="#7c3aed" filter="url(#shadow)"/>
+  <text x="1840" y="396" class="file">storage/auth.py</text>
+  <text x="1840" y="429" class="label">Credential helpers</text>
+  <text x="1840" y="452" class="small">validate username/password</text>
+  <text x="1840" y="470" class="small">hash / verify password</text>
+  <text x="1840" y="488" class="small">create token / expiry helpers</text>
+
+  <rect x="1814" y="556" width="306" height="388" class="box" fill="url(#storageFill)" stroke="#6d28d9" filter="url(#shadow)"/>
+  <text x="1840" y="592" class="file">storage/user_store.py</text>
+  <rect x="1840" y="620" width="254" height="72" class="box" fill="#ffffff" stroke="#c4b5fd"/>
+  <text x="1858" y="653" class="label">User/token store</text>
+  <text x="1858" y="676" class="small">`create_user()` `authenticate_user()` `issue_token_for_user()`</text>
+  <rect x="1840" y="712" width="254" height="88" class="box" fill="#ffffff" stroke="#c4b5fd"/>
+  <text x="1858" y="745" class="label">Session store</text>
+  <text x="1858" y="768" class="small">`get_session()` `update_session()`</text>
+  <text x="1858" y="786" class="small">`update_session_summary()` `list_user_session_snapshots()`</text>
+  <rect x="1840" y="820" width="254" height="88" class="box" fill="#ffffff" stroke="#c4b5fd"/>
+  <text x="1858" y="853" class="label">Interaction store</text>
+  <text x="1858" y="876" class="small">feedback / logs / metrics / proficiency rows</text>
+  <text x="1858" y="894" class="small">SQLite with WAL</text>
+
+  <rect x="1814" y="970" width="306" height="188" class="box" fill="url(#storageFill)" stroke="#8b5cf6" filter="url(#shadow)"/>
+  <text x="1840" y="1006" class="file">storage/proficiency.py</text>
+  <text x="1840" y="1039" class="label">Before chat</text>
+  <text x="1840" y="1062" class="small">`get_initial_hint_level()`</text>
+  <text x="1840" y="1080" class="small">`get_proficiency_summary()`</text>
+  <text x="1840" y="1110" class="label">After chat</text>
+  <text x="1840" y="1133" class="small">`update_proficiency_from_metric()`</text>
+
+  <rect x="1814" y="1186" width="306" height="260" class="box" fill="url(#storageFill)" stroke="#5b21b6" filter="url(#shadow)"/>
+  <text x="1840" y="1222" class="file">mcp_server/server.py + services.py</text>
+  <text x="1840" y="1255" class="label">Sidecar path</text>
+  <text x="1840" y="1278" class="small">stdio MCP tools</text>
+  <text x="1840" y="1296" class="small">`retrieve_course_docs()`</text>
+  <text x="1840" y="1314" class="small">`get_topology_context()`</text>
+  <text x="1840" y="1332" class="small">`list_available_experiments()`</text>
+  <text x="1840" y="1350" class="small">`get_experiment_manifest()`</text>
+  <text x="1840" y="1380" class="tiny">Bypasses chat orchestration and reuses RAG/Topo APIs directly.</text>
+
+  <rect x="50" y="1568" width="2100" height="214" class="group" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="76" y="1608" class="section">5. 数据载体与外部资源</text>
+  <rect x="110" y="1640" width="240" height="88" class="box" fill="url(#dataFill)" stroke="#64748b"/>
+  <text x="128" y="1673" class="label">`data/*.docx`</text>
+  <text x="128" y="1696" class="small">course docs for chunking and retrieval</text>
+  <rect x="390" y="1640" width="240" height="88" class="box" fill="url(#dataFill)" stroke="#64748b"/>
+  <text x="408" y="1673" class="label">`faiss_index/`</text>
+  <text x="408" y="1696" class="small">FAISS index + `chunks.pkl`</text>
+  <rect x="670" y="1640" width="240" height="88" class="box" fill="url(#dataFill)" stroke="#64748b"/>
+  <text x="688" y="1673" class="label">`topo_store/`</text>
+  <text x="688" y="1696" class="small">approved_json + manifest</text>
+  <rect x="950" y="1640" width="240" height="88" class="box" fill="url(#dataFill)" stroke="#64748b"/>
+  <text x="968" y="1673" class="label">`data_store/app.db`</text>
+  <text x="968" y="1696" class="small">users/tokens/sessions/metrics/feedback</text>
+  <rect x="1230" y="1640" width="240" height="88" class="box" fill="url(#dataFill)" stroke="#64748b"/>
+  <text x="1248" y="1673" class="label">`sessions.json`</text>
+  <text x="1248" y="1696" class="small">Streamlit UI local state only</text>
+  <rect x="1510" y="1640" width="240" height="88" class="box" fill="url(#dataFill)" stroke="#64748b"/>
+  <text x="1528" y="1673" class="label">DeepSeek API</text>
+  <text x="1528" y="1696" class="small">main chat / classify / summary</text>
+  <rect x="1790" y="1640" width="240" height="88" class="box" fill="url(#dataFill)" stroke="#64748b"/>
+  <text x="1808" y="1673" class="label">DuckDuckGo / OCR model</text>
+  <text x="1808" y="1696" class="small">web search + RapidOCR runtime</text>
+
+  <path d="M472 592 C540 592, 540 592, 604 592" class="arrow"/>
+  <path d="M472 1060 C540 1060, 540 1060, 604 1060" class="arrow-soft"/>
+  <path d="M472 1350 C540 1350, 540 548, 630 548" class="arrow-soft"/>
+  <path d="M870 474 H896" class="arrow"/>
+  <path d="M1016 524 V548" class="arrow"/>
+  <path d="M750 656 V680" class="arrow"/>
+  <path d="M1016 656 V680" class="arrow"/>
+  <path d="M882 592 C930 592, 930 980, 1016 980" class="arrow"/>
+  <path d="M1016 1062 V1088" class="arrow"/>
+  <path d="M1016 1204 V1230" class="arrow"/>
+  <path d="M1016 1370 V1396" class="arrow"/>
+  <path d="M1264 466 C1188 466, 1188 1010, 1136 1010" class="arrow-soft"/>
+  <path d="M1264 466 C1188 466, 1188 1146, 870 1146" class="arrow-soft"/>
+  <path d="M1264 466 C1188 466, 1188 1450, 1016 1450" class="arrow-soft"/>
+
+  <path d="M1136 605 C1220 605, 1220 808, 1290 808" class="arrow-accent"/>
+  <path d="M1136 605 C1220 605, 1220 1000, 1290 1000" class="arrow-accent"/>
+  <path d="M1136 605 C1220 605, 1220 1229, 1290 1229" class="arrow-accent"/>
+  <path d="M870 592 C1130 592, 1130 1439, 1290 1439" class="arrow-soft"/>
+
+  <path d="M1478 468 C1500 468, 1500 422, 1510 422" class="arrow-soft"/>
+  <path d="M1478 468 C1510 468, 1510 1439, 1510 1439" class="arrow-soft"/>
+  <path d="M1688 554 C1760 554, 1760 1064, 1814 1064" class="arrow-soft"/>
+  <path d="M1160 766 C1440 766, 1440 1000, 1504 1000" class="arrow-accent"/>
+  <path d="M1160 766 C1440 766, 1440 1229, 1478 1229" class="arrow-accent"/>
+  <path d="M1478 1229 C1500 1229, 1500 1236, 1500 1236" class="arrow-soft"/>
+
+  <path d="M2120 1260 C2170 1260, 2170 1000, 1714 1000" class="arrow-soft"/>
+  <path d="M2120 1284 C2170 1284, 2170 808, 1714 808" class="arrow-soft"/>
+
+  <path d="M1967 530 V556" class="arrow"/>
+  <path d="M1967 944 V970" class="arrow"/>
+  <path d="M1970 693 C1760 693, 1760 972, 1136 972" class="arrow-soft"/>
+  <path d="M1970 864 C1760 864, 1760 994, 1136 994" class="arrow-soft"/>
+  <path d="M1970 1040 C1760 1040, 1760 1010, 1136 1010" class="arrow-soft"/>
+  <path d="M1970 1118 C1760 1118, 1760 1028, 1136 1028" class="arrow-soft"/>
+
+  <path d="M478 758 C560 758, 560 1684, 1230 1684" class="arrow-soft"/>
+  <path d="M1478 808 C1478 1600, 510 1600, 510 1640" class="arrow-soft"/>
+  <path d="M1478 1000 C1478 1608, 790 1608, 790 1640" class="arrow-soft"/>
+  <path d="M1970 812 C1970 1600, 1070 1600, 1070 1640" class="arrow-soft"/>
+  <path d="M1510 1439 C1510 1600, 1630 1600, 1630 1640" class="arrow-soft"/>
+  <path d="M1400 1229 C1400 1600, 1910 1600, 1910 1640" class="arrow-soft"/>
+  <path d="M1526 1236 C1526 1600, 1910 1600, 1910 1640" class="arrow-soft"/>
+  <path d="M1290 700 C1290 1600, 230 1600, 230 1640" class="arrow-soft"/>
+  <path d="M1967 620 C1967 1600, 1070 1600, 1070 1640" class="arrow-soft"/>
+
+  <text x="1376" y="1588" class="tiny">Most files converge on two critical data objects: conversation state and evidence-bearing context.</text>
+  <text x="70" y="1804" class="subtitle">文件输出位置: /home/octopus/socratic-agent/Draft/core_files_dataflow.svg</text>
+</svg>
