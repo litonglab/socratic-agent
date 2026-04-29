@@ -4,7 +4,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agentic_rag.rag import RAGAgent
 from agentic_rag.web_search import WebSearch
@@ -70,11 +70,67 @@ _SECONDARY_LABEL = {
 
 _IDENTITY_KEYWORDS = ["你是谁", "你是什么", "who are you", "what are you", "自我介绍", "介绍一下你自己"]
 _IDENTITY_REPLY = "我是计算机网络实验课 AI 助教，基于大语言模型技术，并经过课程知识库的专属优化。我可以帮你理解网络理论、排查实验故障、审查配置和辅导计算题。有什么网络问题可以问我！"
+_DIRECT_ANSWER_KEYWORDS = [
+    "直接告诉我", "直接给答案", "直接说答案", "给我答案", "别引导了",
+    "别问我了", "别绕弯子", "你就说吧", "直接说", "直接讲", "不要引导",
+]
+_CONFUSION_KEYWORDS = [
+    "不知道", "不会", "不懂", "看不懂", "没思路", "卡住", "不会做",
+    "没看懂", "想不出来", "不会弄", "不太会",
+]
+_FRUSTRATION_KEYWORDS = [
+    "烦", "急", "麻烦", "算了", "别绕弯", "能不能直说", "怎么这么麻烦",
+    "别再问", "看不下去", "太绕了",
+]
+_RESOLVED_KEYWORDS = [
+    "解决了", "搞定了", "好了", "通了", "成功了", "恢复了",
+    "明白了", "懂了", "可以了", "没问题了",
+]
+_LAB_SYMPTOM_PATTERNS = [
+    r"ping\s*不通",
+    r"邻居.*(起不来|down|init|exstart|full)",
+    r"接口.*down",
+    r"(无法|不能|没法).*(连通|通信|访问|建立)",
+    r"(学不到|没有).*(路由|地址)",
+    r"(失败|超时|timeout|丢包|中断|异常)",
+]
+_LAB_OUTPUT_PATTERNS = [
+    r"```",
+    r"\b(show|display|ping|tracert|traceroute|ipconfig|ifconfig)\b",
+    r"\b(?:ge|gigabitethernet|ethernet|serial|loopback)\s*\d+(?:/\d+){0,2}\b",
+    r"\b\d{1,3}(?:\.\d{1,3}){3}\b",
+    r"\b(up|down|administratively down|full|init|2-way|exstart)\b",
+]
+_LAB_TOPOLOGY_PATTERNS = [
+    r"\b(?:pc|sw|s|r)\d+\b",
+    r"\b(?:router|switch|vlan|ospf|area|acl|trunk)\b",
+    r"\b(?:ge|gigabitethernet|ethernet|serial|loopback)\s*\d+(?:/\d+){0,2}\b",
+]
+_LAB_ACTION_PATTERNS = [
+    r"(执行了|跑了|试了|配置了|配了|查看了|检查了|改了|抓了包)",
+    r"\b(show|display|ping|tracert|traceroute|ipconfig|ifconfig|debug)\b",
+]
+_LAB_OUTPUT_RESULT_PATTERNS = [
+    r"\b(up|down|administratively down|full|init|2-way|exstart)\b",
+    r"\b\d{1,3}(?:\.\d{1,3}){3}\b",
+    r"(超时|timeout|成功|失败|丢包|loss|reachable|unreachable)",
+    r"(状态|结果|输出|回显|显示).{0,12}(是|为|如下|正常|异常)",
+]
+_LAB_OUTPUT_MARKER_PATTERNS = [
+    r"(输出|结果|回显|显示|状态如下|命令结果)",
+    r"\b(show|display|ping|tracert|traceroute|ipconfig|ifconfig|debug)\b",
+]
+_LAB_SLOT_KEYS = ("symptom", "output", "topology", "action")
 
 action_re = re.compile(r'^工具：(\w+)：(.*)$')
 tool_calls_block_re = re.compile(r"<tool_calls>\s*(.*?)\s*</tool_calls>", re.IGNORECASE | re.DOTALL)
 _EXPERIMENT_ID_RE = re.compile(r"(?:实验\s*|lab[\s_-]?)(\d+)", re.IGNORECASE)
 _MAX_TOOL_ACTIONS_PER_TURN = 5
+_TOOL_API_NAME_MAP = {
+    "检索": "rag_retrieve",
+    "拓扑": "topology_retrieve",
+    "搜索": "web_search",
+}
 
 
 @dataclass(frozen=True)
@@ -95,6 +151,30 @@ class Evidence(TypedDict):
     raw_text: str
 
 
+class LabEvidenceSlots(TypedDict, total=False):
+    symptom: List[str]
+    output: List[str]
+    topology: List[str]
+    action: List[str]
+
+
+@dataclass(frozen=True)
+class HintSignals:
+    llm_decision: str
+    topic_shift: bool
+    direct_answer_request: bool
+    explicit_confusion: bool
+    frustration: bool
+    solved: bool
+    short_reply: bool
+    repeated_reply: bool
+    evidence_score: int
+    evidence_complete: bool
+    has_new_evidence: bool
+    phase: str
+    stagnation_turns: int
+
+
 class AgentState(TypedDict, total=False):
     user_message: str
     evidences: List[Evidence]
@@ -106,6 +186,11 @@ class AgentState(TypedDict, total=False):
     mode: str
     experiment_id: str
     experiment_label: str
+    hint_state_phase: str
+    hint_stagnation_turns: int
+    lab_evidence_score: int
+    lab_evidence_flags: Dict[str, bool]
+    lab_evidence_slots: LabEvidenceSlots
 
 
 # 每个线程独立持有一个 DeepSeekChatClient（requests.Session 非线程安全）
@@ -162,6 +247,238 @@ def _experiment_label(experiment_id: str) -> str:
     if match:
         return f"实验{int(match.group(1))}"
     return experiment_id
+
+
+def _contains_any_keyword(text: str, keywords: List[str]) -> bool:
+    return any(kw in text for kw in keywords)
+
+
+def _matches_any_pattern(text: str, patterns: List[str]) -> bool:
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+
+def _recent_user_messages(history: List[BaseMessage], limit: int = 3) -> List[str]:
+    messages: List[str] = []
+    for msg in reversed(history):
+        if isinstance(msg, HumanMessage):
+            content = _coerce_to_text(getattr(msg, "content", ""))
+            if content:
+                messages.append(content.strip())
+            if len(messages) >= limit:
+                break
+    return list(reversed(messages))
+
+
+def _normalize_slot_values(values: Any) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    normalized: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _load_lab_evidence_slots(state: Dict[str, Any]) -> LabEvidenceSlots:
+    raw = state.get("lab_evidence_slots", {})
+    slots: LabEvidenceSlots = {}
+    for key in _LAB_SLOT_KEYS:
+        slots[key] = _normalize_slot_values(raw.get(key, [])) if isinstance(raw, dict) else []
+    return slots
+
+
+def _truncate_fragment(text: str, limit: int = 120) -> str:
+    compact = re.sub(r"\s+", " ", text or "").strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip() + "..."
+
+
+def _extract_lab_evidence_slots(question: str) -> LabEvidenceSlots:
+    text = _coerce_to_text(question or "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    slots: LabEvidenceSlots = {key: [] for key in _LAB_SLOT_KEYS}
+
+    if _matches_any_pattern(text, _LAB_SYMPTOM_PATTERNS):
+        slots["symptom"].append(_truncate_fragment(text))
+
+    has_output_marker = _matches_any_pattern(text, _LAB_OUTPUT_MARKER_PATTERNS)
+    has_output_result = _matches_any_pattern(text, _LAB_OUTPUT_RESULT_PATTERNS)
+    has_code_block = "```" in text
+    if has_code_block or (has_output_marker and has_output_result):
+        slots["output"].append(_truncate_fragment(text, limit=180))
+    elif lines:
+        for line in lines:
+            if _matches_any_pattern(line, _LAB_OUTPUT_MARKER_PATTERNS) and _matches_any_pattern(line, _LAB_OUTPUT_RESULT_PATTERNS):
+                slots["output"].append(_truncate_fragment(line, limit=180))
+                break
+
+    if _matches_any_pattern(text, _LAB_TOPOLOGY_PATTERNS):
+        slots["topology"].append(_truncate_fragment(text))
+
+    if _matches_any_pattern(text, _LAB_ACTION_PATTERNS):
+        slots["action"].append(_truncate_fragment(text))
+
+    return slots
+
+
+def _merge_lab_evidence_slots(
+    existing: LabEvidenceSlots,
+    incoming: LabEvidenceSlots,
+) -> Tuple[LabEvidenceSlots, Dict[str, bool]]:
+    merged: LabEvidenceSlots = {}
+    updates: Dict[str, bool] = {}
+    for key in _LAB_SLOT_KEYS:
+        current_values = list(existing.get(key, []))
+        new_values = []
+        for value in incoming.get(key, []):
+            if value not in current_values and value not in new_values:
+                new_values.append(value)
+        merged[key] = current_values + new_values
+        updates[key] = bool(new_values)
+    return merged, updates
+
+
+def _score_lab_evidence(state: Dict[str, Any], question: str) -> Tuple[int, Dict[str, bool], LabEvidenceSlots, Dict[str, bool]]:
+    existing_slots = _load_lab_evidence_slots(state)
+    incoming_slots = _extract_lab_evidence_slots(question)
+    merged_slots, slot_updates = _merge_lab_evidence_slots(existing_slots, incoming_slots)
+    flags = {key: bool(merged_slots.get(key)) for key in _LAB_SLOT_KEYS}
+    score = sum(1 for value in flags.values() if value)
+    return score, flags, merged_slots, slot_updates
+
+
+def _compute_hint_signals(
+    question: str,
+    history: List[BaseMessage],
+    state: Dict[str, Any],
+    category: str,
+    prev_category: str,
+    classification: Dict[str, Any],
+) -> HintSignals:
+    q = (question or "").strip()
+    q_low = q.lower()
+    topic_shift = bool(prev_category and prev_category != category)
+    llm_decision = classification.get("hint_decision", "MAINTAIN")
+
+    recent_user_msgs = _recent_user_messages(history, limit=2)
+    prev_user = recent_user_msgs[-1].strip().lower() if recent_user_msgs else ""
+    repeated_reply = bool(prev_user and q_low and prev_user == q_low)
+    short_reply = len(q) <= 12
+
+    direct_answer_request = _contains_any_keyword(q, _DIRECT_ANSWER_KEYWORDS)
+    explicit_confusion = _contains_any_keyword(q, _CONFUSION_KEYWORDS)
+    frustration = _contains_any_keyword(q, _FRUSTRATION_KEYWORDS)
+    solved = _contains_any_keyword(q, _RESOLVED_KEYWORDS)
+
+    evidence_score, evidence_flags, evidence_slots, slot_updates = _score_lab_evidence(state, q)
+    previous_evidence_score = int(state.get("lab_evidence_score", 0))
+    previous_phase = state.get("hint_state_phase", "probing")
+    previous_stagnation = int(state.get("hint_stagnation_turns", 0))
+    has_new_evidence = any(slot_updates.values())
+    evidence_complete = bool(
+        evidence_flags.get("symptom")
+        and evidence_flags.get("output")
+        and evidence_flags.get("topology")
+    )
+
+    if category != "LAB_TROUBLESHOOTING":
+        phase = "resolved" if solved else "guiding"
+    elif solved:
+        phase = "resolved"
+    elif evidence_score <= 1:
+        phase = "probing"
+    elif evidence_score == 2:
+        phase = "gathering_evidence"
+    elif evidence_complete and (explicit_confusion or llm_decision == "INCREASE"):
+        phase = "proposing_fix"
+    elif evidence_complete:
+        phase = "narrowing_root_cause"
+    else:
+        phase = previous_phase
+
+    progress_signal = solved or has_new_evidence or topic_shift or (
+        category == "LAB_TROUBLESHOOTING" and previous_phase != phase
+    )
+    stuck_signal = (
+        repeated_reply
+        or explicit_confusion
+        or frustration
+        or (llm_decision == "INCREASE" and not progress_signal)
+        or (
+            category == "LAB_TROUBLESHOOTING"
+            and not has_new_evidence
+            and evidence_score <= previous_evidence_score
+            and not topic_shift
+        )
+    )
+
+    if solved or topic_shift or progress_signal:
+        stagnation_turns = 0
+    elif stuck_signal:
+        stagnation_turns = previous_stagnation + 1
+    else:
+        stagnation_turns = max(0, previous_stagnation - 1)
+
+    state["lab_evidence_score"] = evidence_score
+    state["lab_evidence_flags"] = evidence_flags
+    state["lab_evidence_slots"] = evidence_slots
+
+    return HintSignals(
+        llm_decision=llm_decision,
+        topic_shift=topic_shift,
+        direct_answer_request=direct_answer_request,
+        explicit_confusion=explicit_confusion,
+        frustration=frustration,
+        solved=solved,
+        short_reply=short_reply,
+        repeated_reply=repeated_reply,
+        evidence_score=evidence_score,
+        evidence_complete=evidence_complete,
+        has_new_evidence=has_new_evidence,
+        phase=phase,
+        stagnation_turns=stagnation_turns,
+    )
+
+
+def _apply_hint_state_machine(
+    category: str,
+    current_level: int,
+    max_level: int,
+    signals: HintSignals,
+) -> Tuple[int, bool, str]:
+    if current_level >= max_level:
+        return max_level, False, "max_level_cap"
+
+    if signals.direct_answer_request:
+        return max_level, False, "direct_answer_request"
+
+    if signals.solved:
+        return current_level, False, "resolved"
+
+    if category == "LAB_TROUBLESHOOTING":
+        if signals.llm_decision == "JUMP_TO_MAX" and (signals.direct_answer_request or signals.frustration):
+            return max_level, False, "lab_user_requested_direct_answer"
+        if signals.phase == "probing" and signals.stagnation_turns >= 3:
+            return min(current_level + 1, max_level), True, "stalled_without_evidence"
+        if signals.phase == "gathering_evidence" and signals.stagnation_turns >= 4:
+            return min(current_level + 1, max_level), True, "evidence_collection_stalled"
+        if signals.phase == "narrowing_root_cause" and signals.explicit_confusion:
+            return min(current_level + 1, max_level), False, "root_cause_confirmed_need_more_help"
+        if signals.phase == "proposing_fix" and signals.evidence_complete:
+            return max_level, False, "evidence_complete_ready_to_converge"
+        if signals.llm_decision == "INCREASE" and (signals.explicit_confusion or signals.frustration):
+            return min(current_level + 1, max_level), False, "llm_and_user_distress_agree"
+        return current_level, False, "maintain_lab_phase"
+
+    if signals.llm_decision == "JUMP_TO_MAX":
+        return max_level, False, "llm_jump_to_max"
+    if signals.llm_decision == "INCREASE" and (signals.explicit_confusion or signals.frustration or signals.stagnation_turns >= 2):
+        return min(current_level + 1, max_level), False, "non_lab_increase"
+    if signals.stagnation_turns >= 3 and not signals.short_reply:
+        return min(current_level + 1, max_level), True, "non_lab_stagnation_failsafe"
+    return current_level, False, "maintain_non_lab"
 
 
 def _strip_json_code_fence(payload: str) -> str:
@@ -274,6 +591,26 @@ def _has_open_tool_calls_block(text: str) -> bool:
     if start == -1:
         return False
     return lowered.find("</tool_calls>", start) == -1
+
+
+def _tool_api_name(tool_name: str) -> str:
+    alias = _TOOL_API_NAME_MAP.get(tool_name)
+    if alias:
+        return alias
+    sanitized = re.sub(r"[^A-Za-z0-9_-]+", "_", tool_name or "").strip("_")
+    return (sanitized or "tool_call")[:64]
+
+
+def _build_tool_calls(action_matches: List[ToolActionMatch], turn_index: int) -> List[Dict[str, Any]]:
+    tool_calls: List[Dict[str, Any]] = []
+    for idx, action in enumerate(action_matches):
+        tool_calls.append({
+            "id": f"call_{turn_index}_{idx}",
+            "type": "tool_call",
+            "name": _tool_api_name(action.tool),
+            "args": {"input": action.action_input},
+        })
+    return tool_calls
 
 
 def _resolve_experiment_context(
@@ -408,6 +745,18 @@ class Agent():
         self.messages.append(AIMessage(content=result))
         return result
 
+    def add_user_message(self, content: str):
+        self.messages.append(HumanMessage(content=content))
+
+    def add_ai_message(self, content: str, *, tool_calls: Optional[List[Dict[str, Any]]] = None):
+        if tool_calls:
+            self.messages.append(AIMessage(content=content, tool_calls=tool_calls))
+            return
+        self.messages.append(AIMessage(content=content))
+
+    def add_tool_message(self, content: str, *, tool_call_id: str, name: Optional[str] = None):
+        self.messages.append(ToolMessage(content=content, tool_call_id=tool_call_id, name=name))
+
     def execute(self):
         response = _get_client().invoke(self.messages)
         return response.content
@@ -446,6 +795,7 @@ def _prepare_context(
     state: Dict[str, Any],
     user_id: Optional[str],
     enable_websearch: bool,
+    allow_process_explanations: bool,
     debug: bool,
 ) -> _QueryContext:
     """
@@ -457,6 +807,11 @@ def _prepare_context(
     state.setdefault("turns_at_current_level", 0)
     state.setdefault("user_turn_count", 0)
     state.setdefault("lab_turn_count", 0)
+    state.setdefault("hint_state_phase", "probing")
+    state.setdefault("hint_stagnation_turns", 0)
+    state.setdefault("lab_evidence_score", 0)
+    state.setdefault("lab_evidence_flags", {})
+    state.setdefault("lab_evidence_slots", {})
 
     state["user_turn_count"] += 1
 
@@ -506,59 +861,55 @@ def _prepare_context(
 
     experiment_id, experiment_label = _resolve_experiment_context(q, history, state)
 
-    # Hint Level 计算（含 failsafe 逻辑）
+    # Hint Level 计算（显式信号 + 状态机）
     current_level = state.get("hint_level", 0)
     state["_hint_level_start"] = current_level
     turns_at_level = state.get("turns_at_current_level", 0)
     max_level = _MAX_HINT_LEVEL.get(category, 3)
+    signals = _compute_hint_signals(q, history, state, category, prev_category, classification)
+    current_hint_level, was_failsafe, transition_reason = _apply_hint_state_machine(
+        category=category,
+        current_level=current_level,
+        max_level=max_level,
+        signals=signals,
+    )
+    state["hint_state_phase"] = signals.phase
+    state["hint_stagnation_turns"] = signals.stagnation_turns
 
-    if current_level >= max_level:
-        current_hint_level = max_level
-        state["turns_at_current_level"] = turns_at_level + 1
+    if current_hint_level > current_level:
+        turns_at_level = 0
+    elif current_hint_level >= max_level:
+        turns_at_level = turns_at_level + 1
     else:
-        hint_decision = classification["hint_decision"]
-        if hint_decision == "JUMP_TO_MAX":
-            current_hint_level = max_level
-            turns_at_level = 0
-            print(f"[Hint Logic] AI decided to JUMP_TO_MAX -> level {max_level}")
-        elif hint_decision == "INCREASE":
-            current_hint_level = current_level + 1
-            turns_at_level = 0
-            print(f"[Hint Logic] AI decided to INCREASE to level {current_hint_level}")
-        else:
-            turns_at_level += 1
-            if turns_at_level >= 3:
-                current_hint_level = current_level + 1
-                turns_at_level = 0
-                print(f"[Hint Logic] Failsafe triggered (3 turns stuck). FORCED INCREASE to level {current_hint_level}")
-            else:
-                current_hint_level = current_level
-                print(f"[Hint Logic] Maintaining level {current_level} (Streak: {turns_at_level}/3)")
-        current_hint_level = min(current_hint_level, max_level)
-        state["turns_at_current_level"] = turns_at_level
+        turns_at_level = turns_at_level + 1 if signals.stagnation_turns > 0 else 0
+    state["turns_at_current_level"] = turns_at_level
 
-    # LAB 3 轮强制收敛
-    if category == "LAB_TROUBLESHOOTING" and state["lab_turn_count"] >= 3:
-        current_hint_level = max_level
+    print(
+        "[Hint Logic] "
+        f"phase={signals.phase} evidence={signals.evidence_score} "
+        f"stagnation={signals.stagnation_turns} llm={signals.llm_decision} "
+        f"-> level {current_hint_level} ({transition_reason})"
+    )
     state["hint_level"] = current_hint_level
 
     # 水平采集记录
     state["_hint_decision"] = classification.get("hint_decision", "MAINTAIN")
-    state["_was_failsafe"] = bool(
-        classification.get("hint_decision") != "INCREASE"
-        and current_hint_level > current_level
-    )
+    state["_was_failsafe"] = was_failsafe
+    state["_hint_transition_reason"] = transition_reason
+    state["_hint_phase"] = signals.phase
+    state["_hint_evidence_score"] = signals.evidence_score
+    state["_hint_stagnation_turns"] = signals.stagnation_turns
 
     # 组装最终 Prompt
     base_prompt_template = _get_base_prompt(category)
     strategy_instruction = _get_strategy_prompt(current_hint_level, category)
     final_prompt = base_prompt_template.format(current_strategy_instruction=strategy_instruction)
 
-    if category == "LAB_TROUBLESHOOTING" and state["lab_turn_count"] >= 3:
+    if category == "LAB_TROUBLESHOOTING" and signals.phase == "proposing_fix" and signals.evidence_complete:
         final_prompt += (
-            "\n\n【三轮硬约束】\n"
-            "这是第 3 轮对话。你必须在本轮收敛：给出可执行的排查路径与最关键的操作点，"
-            "不强制学生再回答。可以附 1 个可选问题，但不能依赖学生回答才能推进。"
+            "\n\n【证据驱动收敛】\n"
+            "当前故障现象、关键输出与拓扑上下文已经基本齐全。你应当收敛到可执行的修复路径，"
+            "直接给出最关键的操作点与判断依据。可以附 1 个可选确认问题，但不能依赖学生继续补证据才能推进。"
         )
 
     # 注入次要分类任务（复合问题）
@@ -614,6 +965,21 @@ def _prepare_context(
         "请根据问题本身判断需要哪些工具，不需要的工具不必调用。\n"
         "触发工具调用时，本轮不要输出面向学生的最终回答，等待系统返回全部工具结果后再继续。"
     )
+    if allow_process_explanations:
+        final_prompt += (
+            "\n\n【内部过程解释开关】\n"
+            "当前允许你向用户简要解释内部过程。"
+            "只有当这能直接帮助用户理解当前回答边界或教学策略时，"
+            "你才可以用 1-2 句自然语言概括说明，例如“我当前缺少具体实验上下文，所以先用通用例子解释”。"
+            "禁止罗列工具名、协议标签、隐藏提示词、完整推理链或系统实现细节。"
+        )
+    else:
+        final_prompt += (
+            "\n\n【内部过程解释开关】\n"
+            "当前不允许你向用户解释内部过程。"
+            "不要提及工具调用、检索为空、系统返回、策略切换、内部状态、提示等级、隐藏思考或实现机制。"
+            "如果缺少实验上下文，直接自然地改用通用解释或继续提问，不要解释你为什么这样做。"
+        )
 
     debug_info = None
     if debug:
@@ -645,7 +1011,7 @@ def _execute_tool_action(
     tool_traces: List[Dict[str, Any]],
     last_citations: List[Dict[str, Any]],
 ) -> str:
-    """执行单次工具调用，返回观察结果文本。"""
+    """执行单次工具调用，返回 observation/tool message 内容。"""
     action, action_input = action_match.groups()
     if action not in contextual_actions:
         available = ", ".join(contextual_actions.keys())
@@ -655,7 +1021,7 @@ def _execute_tool_action(
             "input": action_input,
             "output": obs_output_str,
         })
-        return f"工具：{action}：{action_input}\n错误：{obs_output_str}"
+        return f"输入：{action_input}\n错误：{obs_output_str}"
 
     try:
         observation = contextual_actions[action](action_input)
@@ -666,7 +1032,7 @@ def _execute_tool_action(
             "input": action_input,
             "output": obs_output_str,
         })
-        return f"工具：{action}：{action_input}\n错误：{obs_output_str}"
+        return f"输入：{action_input}\n错误：{obs_output_str}"
     if isinstance(observation, dict) and observation.get("citations"):
         existing = {
             (c.get("source", "unknown"), c.get("snippet", ""))
@@ -689,7 +1055,7 @@ def _execute_tool_action(
         "input": action_input,
         "output": obs_output_str[:2000],
     })
-    return f"工具：{action}：{action_input}\n检索结果：{obs_output_str}"
+    return f"输入：{action_input}\n结果：{obs_output_str}"
 
 
 def _execute_tool_actions(
@@ -697,13 +1063,13 @@ def _execute_tool_actions(
     contextual_actions: Dict[str, Any],
     tool_traces: List[Dict[str, Any]],
     last_citations: List[Dict[str, Any]],
-) -> str:
-    """并行执行一批工具调用，按原始顺序拼接结果回下一轮上下文。"""
+) -> List[str]:
+    """并行执行一批工具调用，按原始顺序返回 observation/tool message 内容。"""
     if len(action_matches) <= 1:
-        return "\n\n".join(
+        return [
             _execute_tool_action(m, contextual_actions, tool_traces, last_citations)
             for m in action_matches
-        )
+        ]
 
     per_action_traces: List[List[Dict[str, Any]]] = [[] for _ in action_matches]
     per_action_citations: List[List[Dict[str, Any]]] = [[] for _ in action_matches]
@@ -732,8 +1098,7 @@ def _execute_tool_actions(
                 c["id"] = len(last_citations) + 1
                 last_citations.append(c)
 
-    ordered = [results[i] for i in range(len(action_matches))]
-    return "\n\n".join(ordered)
+    return [results[i] for i in range(len(action_matches))]
 
 
 def _find_action(text: str):
@@ -754,13 +1119,16 @@ def query(
     state: Optional[Dict[str, Any]] = None,
     user_id: Optional[str] = None,
     enable_websearch: bool = True,
+    allow_process_explanations: bool = True,
 ) -> Tuple[str, List[BaseMessage], List[Dict[str, Any]], Dict[str, Any]]:
     if history is None:
         history = []
     if state is None:
         state = {}
 
-    ctx = _prepare_context(question, history, state, user_id, enable_websearch, debug)
+    ctx = _prepare_context(
+        question, history, state, user_id, enable_websearch, allow_process_explanations, debug
+    )
     q = (question or "").strip()
 
     # 快速拦截（身份类）
@@ -779,13 +1147,13 @@ def query(
 
     # Agent 执行循环
     bot = Agent(ctx.final_prompt, history)
-    next_prompt = q
     tool_traces: List[Dict[str, Any]] = []
     last_citations: List[Dict[str, Any]] = []
     final_result = ""
+    bot.add_user_message(q)
 
     for i in range(max_turns):
-        result = bot(next_prompt)
+        result = bot.execute()
         final_result = result
 
         if debug:
@@ -795,11 +1163,20 @@ def query(
         if action_matches:
             if debug:
                 print(f"[DEBUG] Parsed {len(action_matches)} tool actions in turn {i + 1}")
-            next_prompt = _execute_tool_actions(
+            tool_calls = _build_tool_calls(action_matches, i + 1)
+            bot.add_ai_message(result, tool_calls=tool_calls)
+            observations = _execute_tool_actions(
                 action_matches, ctx.contextual_actions, tool_traces, last_citations
             )
+            for action_match, tool_call, observation in zip(action_matches, tool_calls, observations):
+                bot.add_tool_message(
+                    observation,
+                    tool_call_id=tool_call["id"],
+                    name=action_match.tool,
+                )
             continue
 
+        bot.add_ai_message(result)
         break
 
     if _find_actions(final_result):
@@ -828,6 +1205,7 @@ def query_stream(
     state: Optional[Dict[str, Any]] = None,
     user_id: Optional[str] = None,
     enable_websearch: bool = True,
+    allow_process_explanations: bool = True,
 ):
     """
     流式版 query()。yield 字典：
@@ -839,7 +1217,9 @@ def query_stream(
     if state is None:
         state = {}
 
-    ctx = _prepare_context(question, history, state, user_id, enable_websearch, debug)
+    ctx = _prepare_context(
+        question, history, state, user_id, enable_websearch, allow_process_explanations, debug
+    )
     q = (question or "").strip()
 
     # 快速拦截（身份类）
@@ -867,14 +1247,12 @@ def query_stream(
 
     # Agent 循环（流式）
     bot = Agent(ctx.final_prompt, history)
-    next_prompt = q
     tool_traces: List[Dict[str, Any]] = []
     last_citations: List[Dict[str, Any]] = []
     final_result = ""
+    bot.add_user_message(q)
 
     for i in range(max_turns):
-        bot.messages.append(HumanMessage(content=next_prompt))
-
         accumulated = ""
         found_actions: List[ToolActionMatch] = []
         started_forwarding = False
@@ -898,15 +1276,22 @@ def query_stream(
                 yield {"type": "token", "content": token}
 
         full_turn_text = getattr(bot, '_last_stream_result', accumulated)
-        bot.messages.append(AIMessage(content=full_turn_text))
 
         action_matches = found_actions or _find_actions(full_turn_text)
         if action_matches:
             if debug:
                 print(f"[DEBUG] Parsed {len(action_matches)} tool actions in streaming turn {i + 1}")
-            next_prompt = _execute_tool_actions(
+            tool_calls = _build_tool_calls(action_matches, i + 1)
+            bot.add_ai_message(full_turn_text, tool_calls=tool_calls)
+            observations = _execute_tool_actions(
                 action_matches, ctx.contextual_actions, tool_traces, last_citations
             )
+            for action_match, tool_call, observation in zip(action_matches, tool_calls, observations):
+                bot.add_tool_message(
+                    observation,
+                    tool_call_id=tool_call["id"],
+                    name=action_match.tool,
+                )
             if not started_forwarding:
                 continue
             else:
@@ -914,6 +1299,7 @@ def query_stream(
                 # 仍以工具执行优先，交由下一轮继续推理。
                 continue
 
+        bot.add_ai_message(full_turn_text)
         final_result = full_turn_text
         break
 
@@ -947,6 +1333,8 @@ def messages_to_dicts(messages: List[BaseMessage]) -> List[Dict[str, str]]:
             role = "assistant"
         elif isinstance(m, SystemMessage):
             role = "system"
+        elif isinstance(m, ToolMessage):
+            role = "tool"
         out.append({"role": role, "content": m.content})
     return out
 
@@ -960,6 +1348,8 @@ def dicts_to_messages(items: List[Dict[str, str]]) -> List[BaseMessage]:
             out.append(AIMessage(content=content))
         elif role == "system":
             out.append(SystemMessage(content=content))
+        elif role == "tool":
+            out.append(ToolMessage(content=content, tool_call_id=it.get("tool_call_id", "tool_call")))
         else:
             out.append(HumanMessage(content=content))
     return out

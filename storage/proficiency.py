@@ -37,6 +37,10 @@ def compute_turn_signal(state: Dict[str, Any]) -> float:
     hint_end = state.get("hint_level", 0)
     hint_decision = state.get("_hint_decision", "MAINTAIN")
     was_failsafe = state.get("_was_failsafe", False)
+    transition_reason = state.get("_hint_transition_reason", "")
+    phase = state.get("_hint_phase", "")
+    evidence_score = int(state.get("_hint_evidence_score", 0) or 0)
+    stagnation_turns = int(state.get("_hint_stagnation_turns", 0) or 0)
 
     signal = 0.0
 
@@ -45,15 +49,29 @@ def compute_turn_signal(state: Dict[str, Any]) -> float:
     if level_delta > 0:
         signal -= 0.3 * level_delta
         if was_failsafe:
-            signal -= 0.1  # failsafe 额外惩罚（3 轮卡住）
+            signal -= 0.1
 
-    # 因素 2：低 Level 保持 = 正信号
+    # 因素 2：状态机原因修正
+    if transition_reason in {"direct_answer_request", "lab_user_requested_direct_answer"}:
+        signal += 0.1  # 用户选择直接收敛，不等同于能力不足
+    elif transition_reason in {"evidence_complete_ready_to_converge", "resolved"}:
+        signal += 0.15
+    elif transition_reason in {"stalled_without_evidence", "evidence_collection_stalled", "non_lab_stagnation_failsafe"}:
+        signal -= 0.15
+
+    # 因素 3：低 Level 保持 = 正信号
     if hint_decision == "MAINTAIN" and hint_start <= 1 and level_delta == 0:
         signal += 0.2
 
-    # 因素 3：在 Level 0 保持 = 额外加分
+    # 因素 4：在 Level 0 保持 = 额外加分
     if hint_start == 0 and level_delta == 0:
         signal += 0.1
+
+    # 因素 5：LAB 证据推进是正信号，长时间停滞是负信号
+    if phase in {"narrowing_root_cause", "proposing_fix"} and evidence_score >= 3:
+        signal += 0.1
+    if stagnation_turns >= 3:
+        signal -= 0.1
 
     return max(-1.0, min(1.0, signal))
 

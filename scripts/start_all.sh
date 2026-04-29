@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # 生产模式：uvicorn 的 lifespan 会阻塞直到 RAG 完全就绪后才开放端口
 # 因此 /health 能通 == RAG 已就绪，无需二阶段等待
+# Streamlit 关闭 file watcher，规避 transformers 懒加载扫描 torchvision 子模块时报错刷屏
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+
+export STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
 uvicorn server:app --port 8000 &
 BACK_PID=$!
@@ -19,7 +22,8 @@ for i in $(seq 1 180); do
   sleep 1
 done
 
-streamlit run app_streamlit.py &
+streamlit run app_streamlit.py \
+  --server.fileWatcherType none &
 FRONT_PID=$!
 
 cleanup() { kill "$BACK_PID" "$FRONT_PID" 2>/dev/null || true; }
