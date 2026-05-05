@@ -4,7 +4,6 @@ pydantic
 requests
 openai
 python-dotenv
-streamlit
 langchain
 langchain-core
 langchain-community

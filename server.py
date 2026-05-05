@@ -40,8 +40,6 @@ from storage.user_store import (
     update_session,
     update_session_summary,
     delete_session as delete_user_session,
-    delete_all_sessions as delete_all_user_sessions,
-    list_user_sessions,
     list_user_session_snapshots,
     set_session_archived as set_user_session_archived,
     append_log,
@@ -70,7 +68,7 @@ MAX_RUNTIME_HISTORY_CHARS = int(os.getenv("MAX_RUNTIME_HISTORY_CHARS", "12000"))
 PERSISTED_LAST_TURNS = int(os.getenv("PERSISTED_LAST_TURNS", "6"))
 CHAT_SEMAPHORE = threading.BoundedSemaphore(MAX_CHAT_CONCURRENCY)
 
-# ✅ LLM 延迟初始化（Streamlit import 时不会立刻构建）
+# ✅ LLM 延迟初始化（import 时不会立刻构建）
 _SUMMARY_LLM = None
 _SUMMARY_LLM_LOCK = threading.Lock()
 _SESSION_LOCKS: Dict[Tuple[str, str], threading.Lock] = {}
@@ -435,40 +433,6 @@ def _persist_session_summary(
         pass
 
 
-def load_user_session_cache(*, token: str) -> Dict[str, Any]:
-    user = _require_user_by_token(token)
-    snapshots = list_user_session_snapshots(user["id"])
-    sessions: Dict[str, Dict[str, Any]] = {}
-    for snapshot in snapshots:
-        history = _normalize_message_records(snapshot.get("history") or snapshot.get("last_turns") or [])
-        sessions[snapshot["session_id"]] = {
-            "title": snapshot.get("title") or _session_title_from_messages(history, snapshot["session_id"]),
-            "messages": history,
-            "archived": bool(snapshot.get("archived", False)),
-            "summary": snapshot.get("summary", "") or "",
-            "state": snapshot.get("state", {}) or {},
-            "updated_at": snapshot.get("updated_at"),
-        }
-    return {"sessions": sessions}
-
-
-def delete_session_for_user(*, token: str, session_id: str) -> Dict[str, Any]:
-    user = _require_user_by_token(token)
-    with _hold_session_lock(user["id"], session_id):
-        snapshot = find_session(user["id"], session_id)
-        if snapshot is None:
-            raise HTTPException(status_code=404, detail="session not found")
-        delete_user_session(user["id"], session_id)
-    _remove_session_lock(user["id"], session_id)
-    return {"ok": True, "session_id": session_id}
-
-
-def clear_sessions_for_user(*, token: str) -> Dict[str, Any]:
-    user = _require_user_by_token(token)
-    delete_all_user_sessions(user["id"])
-    return {"ok": True}
-
-
 def set_session_archive_state(*, token: str, session_id: str, archived: bool) -> Dict[str, Any]:
     user = _require_user_by_token(token)
     with _hold_session_lock(user["id"], session_id):
@@ -486,7 +450,7 @@ def set_session_archive_state(*, token: str, session_id: str, archived: bool) ->
 
 
 # -------------------------
-# Core logic (shared by API & Streamlit)
+# Core logic (shared by HTTP endpoints)
 # -------------------------
 
 def _update_summary(prev_summary: str, user_msg: str, assistant_msg: str) -> str:
@@ -673,167 +637,6 @@ def _handle_chat(req: ChatRequest, user: Dict[str, Any]) -> ChatResponse:
             history=response_history,
             tool_traces=[ToolTrace(**t) for t in tool_traces],
         )
-
-
-# ✅ 给 Streamlit 调用的“纯函数入口”（不走 HTTP）
-def chat_once(
-    *,
-    token: str,
-    message: str,
-    session_id: Optional[str] = None,
-    history: Optional[List[Dict[str, str]]] = None,
-    debug: bool = False,
-    max_turns: int = 5,
-    enable_websearch: bool = True,
-    allow_process_explanations: bool = True,
-) -> Dict[str, Any]:
-    """
-    Streamlit 直接调用：
-      resp = chat_once(token=token, message="...", session_id="...", history=[...])
-    返回 dict（可 JSON 序列化）。
-    """
-    user = _require_user_by_token(token)
-    _acquire_chat_slot()
-    try:
-        req = ChatRequest(
-            message=message,
-            session_id=session_id,
-            history=history,
-            debug=debug,
-            max_turns=max_turns,
-            enable_websearch=enable_websearch,
-            allow_process_explanations=allow_process_explanations,
-        )
-        resp = _handle_chat(req, user)
-        return resp.dict()
-    finally:
-        _release_chat_slot()
-
-
-def chat_once_stream(
-    *,
-    token: str,
-    message: str,
-    session_id: Optional[str] = None,
-    history: Optional[List[Dict[str, str]]] = None,
-    debug: bool = False,
-    max_turns: int = 5,
-    enable_websearch: bool = True,
-    allow_process_explanations: bool = True,
-):
-    """
-    Streamlit 直接调用的流式版本。yield 字典：
-      {"type": "meta", "session_id": ..., "message_id": ...}
-      {"type": "token", "content": "..."}
-      {"type": "done", ...}
-    """
-    user = _require_user_by_token(token)
-    user_id = user["id"]
-    _acquire_chat_slot()
-
-    try:
-        sid = session_id or f"s_{uuid4().hex[:10]}"
-        with _hold_session_lock(user_id, sid):
-            message_id = f"m_{uuid4().hex[:12]}"
-
-            session_snapshot = get_session(user_id, sid)
-            history_dicts, _authoritative_history, summary = _choose_history_context(
-                session_snapshot,
-                history,
-                message,
-            )
-            history_msgs = dicts_to_messages(history_dicts)
-            state_dict = session_snapshot.get("state", None)
-
-            yield {"type": "meta", "session_id": sid, "message_id": message_id}
-
-            final_result = ""
-            final_tool_traces: List[Dict[str, Any]] = []
-            final_state = state_dict or {}
-
-            for event in query_stream(
-                message,
-                history=history_msgs,
-                max_turns=max_turns,
-                debug=debug,
-                state=state_dict,
-                user_id=user_id,
-                enable_websearch=enable_websearch,
-                allow_process_explanations=allow_process_explanations,
-            ):
-                if event["type"] == "token":
-                    yield {"type": "token", "content": event["content"]}
-                elif event["type"] == "done":
-                    final_result = event["result"]
-                    final_tool_traces = event["tool_traces"]
-                    final_state = event["state"]
-
-            visible_reply, thinking = split_visible_and_thinking(final_result)
-            full_history, last_turns, session_title, session_archived = _build_session_history_records(
-                session_snapshot,
-                history,
-                message,
-                visible_reply,
-                thinking,
-                message_id,
-                final_tool_traces,
-            )
-            response_history, _ = _finalize_history(full_history)
-            persisted_updated_at = _persist_session_snapshot(
-                summary=summary,
-                user_id=user_id,
-                session_id=sid,
-                full_history=full_history,
-                last_turns=last_turns,
-                state=final_state or {},
-                title=session_title,
-                archived=session_archived,
-            )
-            yield {
-                "type": "done",
-                "session_id": sid,
-                "message_id": message_id,
-                "reply": visible_reply,
-                "thinking": thinking,
-                "history": response_history,
-                "tool_traces": final_tool_traces,
-            }
-            _persist_session_summary(
-                prev_summary=summary,
-                user_msg=message,
-                assistant_msg=visible_reply,
-                user_id=user_id,
-                session_id=sid,
-                persisted_updated_at=persisted_updated_at,
-            )
-            _persist_chat_async(
-                assistant_msg=visible_reply,
-                user_id=user_id,
-                session_id=sid,
-                state=final_state or {},
-                traces=final_tool_traces,
-            )
-    finally:
-        _release_chat_slot()
-
-
-def submit_feedback(*, token: str, session_id: str, message_id: str, feedback: str) -> Dict[str, Any]:
-    user = _require_user_by_token(token)
-    user_id = user["id"]
-    if feedback in {"like", "dislike"}:
-        upsert_message_feedback(user_id, session_id, message_id, feedback)
-        append_log(user_id, "feedback", f"{feedback}:{session_id}:{message_id}")
-        return {
-            "ok": True,
-            "session_id": session_id,
-            "message_id": message_id,
-            "feedback": get_message_feedback(user_id, session_id, message_id),
-        }
-    if feedback == "cancel":
-        delete_message_feedback(user_id, session_id, message_id)
-        append_log(user_id, "feedback", f"cancel:{session_id}:{message_id}")
-        return {"ok": True, "session_id": session_id, "message_id": message_id, "feedback": None}
-    raise HTTPException(status_code=400, detail="invalid feedback")
 
 
 def register_user(req: RegisterRequest) -> Dict[str, Any]:
