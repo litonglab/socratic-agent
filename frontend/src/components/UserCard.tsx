@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   AlertTriangle,
+  IdCard,
 } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
@@ -33,7 +34,17 @@ export default function UserCard({
   const initial = (user.username?.[0] || "U").toUpperCase()
   const className = (user.profile?.class_name || "").trim() || "未填写班级"
   const [archOpen, setArchOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
   const [confirmLogout, setConfirmLogout] = useState(false)
+
+  const profileFields: Array<{ label: string; value: string }> = [
+    { label: "姓名", value: (user.profile?.name || "").trim() },
+    { label: "昵称", value: (user.profile?.nickname || "").trim() },
+    { label: "学号", value: (user.profile?.student_id || "").trim() },
+    { label: "班级", value: (user.profile?.class_name || "").trim() },
+    { label: "邮箱", value: (user.profile?.email || "").trim() },
+    { label: "账号", value: (user.username || "").trim() },
+  ]
 
   return (
     <div className="border-t border-[hsl(var(--border))] bg-white/97 backdrop-blur-sm px-2 py-2">
@@ -59,6 +70,49 @@ export default function UserCard({
           <div className="text-xs text-[hsl(var(--muted-foreground))] px-2 py-1.5">
             会话历史与状态以后端数据库为准
           </div>
+          <Separator className="my-1" />
+
+          {/* 我的资料折叠 */}
+          <button
+            type="button"
+            className="w-full flex items-center justify-between px-2 py-1.5 text-sm rounded-md hover:bg-[hsl(var(--accent))]"
+            onClick={() => setProfileOpen((v) => !v)}
+            aria-expanded={profileOpen}
+          >
+            <span className="flex items-center gap-2">
+              {profileOpen ? (
+                <ChevronDown className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronRight className="w-3.5 h-3.5" />
+              )}
+              <IdCard className="w-3.5 h-3.5 text-[hsl(var(--primary))]" />
+              我的资料
+            </span>
+          </button>
+          {profileOpen && (
+            <div className="px-1 py-1">
+              <dl className="rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--accent))]/40 px-2 py-1.5 text-xs space-y-1">
+                {profileFields.map((f) => (
+                  <div key={f.label} className="flex items-center gap-2">
+                    <dt className="w-10 shrink-0 text-[hsl(var(--muted-foreground))]">
+                      {f.label}
+                    </dt>
+                    <dd
+                      className={
+                        f.value
+                          ? "flex-1 min-w-0 truncate text-[hsl(var(--ink-900,#2A1F1D))]"
+                          : "flex-1 min-w-0 truncate italic text-[hsl(var(--muted-foreground))]"
+                      }
+                      title={f.value || "未填写"}
+                    >
+                      {f.value || "未填写"}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          )}
+
           <Separator className="my-1" />
 
           {/* 已归档折叠 */}

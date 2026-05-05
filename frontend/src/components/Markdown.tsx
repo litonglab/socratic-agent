@@ -1,3 +1,4 @@
+import type { ComponentProps } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import rehypeHighlight from "rehype-highlight"
@@ -60,13 +61,22 @@ export default function Markdown({ content, className, inverse }: Props) {
             </blockquote>
           ),
           hr: () => <hr className={cn("my-3", inverse ? "border-white/30" : "border-[hsl(var(--border))]")} />,
-          code: ({ inline, className, children, ...props }: any) => {
-            if (inline) {
+          code: ({ className, children, ...props }: ComponentProps<"code">) => {
+            // react-markdown v10 移除了 inline 参数；通过约定判断：
+            //  - rehype-highlight 给代码块加 className="language-xxx"
+            //  - 且代码块内容包含换行
+            // 二者满足任一即视为 block code，否则按 inline 渲染（小高亮背景）
+            const text = typeof children === "string" ? children : String(children ?? "")
+            const isBlock =
+              (className && className.includes("language-")) || text.includes("\n")
+            if (!isBlock) {
               return (
                 <code
                   className={cn(
                     "px-1.5 py-0.5 rounded text-[0.9em] font-mono",
-                    inverse ? "bg-white/15 text-white" : "bg-[hsl(var(--accent))] text-[hsl(var(--foreground))]",
+                    inverse
+                      ? "bg-white/15 text-white"
+                      : "bg-[hsl(var(--accent))] text-[hsl(var(--foreground))]",
                   )}
                   {...props}
                 >
