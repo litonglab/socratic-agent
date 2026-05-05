@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import json
 import os
@@ -132,6 +133,11 @@ def _hold_session_lock(user_id: str, session_id: str):
 # Pydantic models (API & local)
 # -------------------------
 
+class ChatImageInput(BaseModel):
+    base64: str
+    mime: Optional[str] = None
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
@@ -140,6 +146,7 @@ class ChatRequest(BaseModel):
     max_turns: int = 5
     enable_websearch: bool = True
     allow_process_explanations: bool = True
+    images: Optional[List[ChatImageInput]] = None
 
 
 class ToolTrace(BaseModel):
@@ -971,6 +978,31 @@ def create_app() -> FastAPI:
 
     @app.post("/api/chat/stream")
     def chat_stream(req: ChatRequest, authorization: Optional[str] = Header(None)):
+        # 若客户端附带图片：先做 OCR / 视觉描述，再把内容拼到 message 前
+        if req.images:
+            try:
+                from agentic_rag.vision import describe_image
+                desc_lines: List[str] = []
+                for i, img in enumerate(req.images):
+                    if not img or not img.base64:
+                        continue
+                    try:
+                        img_bytes = base64.b64decode(img.base64)
+                        desc = describe_image(img_bytes, filename=f"image_{i}.png")
+                        desc_lines.append(f"[图片 {i+1}]: {desc}")
+                    except Exception as ex:
+                        desc_lines.append(f"[图片 {i+1}]: (识别失败: {ex})")
+                if desc_lines:
+                    desc_block = "\n".join(desc_lines)
+                    user_text = (req.message or "").strip()
+                    if user_text:
+                        req.message = f"以下是用户上传的图片内容：\n{desc_block}\n\n用户的问题：{user_text}"
+                    else:
+                        req.message = f"以下是用户上传的图片内容：\n{desc_block}\n\n请根据图片内容回答。"
+            except Exception as ex:  # pragma: no cover
+                # vision 模块不可用时仅打印，不阻塞 chat
+                print(f"[chat_stream] image preprocessing failed: {ex}")
+
         user = _resolve_optional_user(authorization)
         _acquire_chat_slot()
 
@@ -1092,8 +1124,27 @@ def create_app() -> FastAPI:
         user = _resolve_optional_user(authorization)
         if user is None:
             with _LEGACY_STORE_LOCK:
-                return {"sessions": list(_LEGACY_SESSIONS.keys())}
-        return {"sessions": list_user_sessions(user["id"])}
+                return {"sessions": [{"session_id": sid} for sid in _LEGACY_SESSIONS.keys()]}
+        snapshots = list_user_session_snapshots(user["id"])
+        sessions = []
+        for s in snapshots:
+            sessions.append({
+                "session_id": s["session_id"],
+                "title": s.get("title") or "新会话",
+                "archived": bool(s.get("archived", False)),
+                "updated_at": s.get("updated_at"),
+            })
+        return {"sessions": sessions}
+
+    @app.post("/api/sessions/{session_id}/archive")
+    def archive_session_endpoint(session_id: str, authorization: Optional[str] = Header(None)):
+        token = _extract_bearer_token(authorization) or ""
+        return set_session_archive_state(token=token, session_id=session_id, archived=True)
+
+    @app.post("/api/sessions/{session_id}/unarchive")
+    def unarchive_session_endpoint(session_id: str, authorization: Optional[str] = Header(None)):
+        token = _extract_bearer_token(authorization) or ""
+        return set_session_archive_state(token=token, session_id=session_id, archived=False)
 
     @app.get("/api/sessions/{session_id}")
     def get_session_detail(session_id: str, authorization: Optional[str] = Header(None)):
@@ -1112,12 +1163,14 @@ def create_app() -> FastAPI:
         snapshot = find_session(user["id"], session_id)
         if snapshot is None:
             raise HTTPException(status_code=404, detail="session not found")
+        history = snapshot.get("history", []) or []
         return {
             "session_id": session_id,
             "title": snapshot.get("title") or "新会话",
             "archived": bool(snapshot.get("archived", False)),
             "summary": snapshot.get("summary", ""),
-            "history": snapshot.get("history", []),
+            "history": history,
+            "messages": history,  # 与前端 React 客户端字段对齐
             "last_turns": snapshot.get("last_turns", []),
             "state": snapshot.get("state", {}),
             "updated_at": snapshot.get("updated_at"),

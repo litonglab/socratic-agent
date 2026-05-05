@@ -941,10 +941,102 @@ st.markdown(
         padding: 0.3rem 0.45rem 0.45rem !important;
     }
 
-    /* === 会话列表行：hover 显示三点 + popover 菜单 === */
+    /* === 会话列表行：ChatGPT 风格（无边框 / 左对齐 / 活跃高亮 / hover 灰底） === */
+    /* CATCH-ALL：sidebar 内所有 tertiary button（含 switch_* 与 popover trigger）全部去边框 */
+    [data-testid="stSidebar"] button[kind="tertiary"],
+    [data-testid="stSidebar"] button[kind="tertiary"]:hover,
+    [data-testid="stSidebar"] button[kind="tertiary"]:focus,
+    [data-testid="stSidebar"] button[kind="tertiary"]:focus-visible,
+    [data-testid="stSidebar"] button[kind="tertiary"]:active {
+        background: transparent !important;
+        background-color: transparent !important;
+        border: none !important;
+        border-color: transparent !important;
+        outline: none !important;
+        box-shadow: none !important;
+        -webkit-tap-highlight-color: transparent !important;
+    }
+
+    [class*="st-key-session_row_"] {
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+
     [class*="st-key-session_row_"] [data-testid="stHorizontalBlock"] {
         align-items: center !important;
-        gap: 0.15rem !important;
+        gap: 0.1rem !important;
+        margin: 0 !important;
+    }
+
+    /* hover 整行显示浅灰背景（包括三点列） */
+    [class*="st-key-session_row_"]:hover {
+        background: rgba(120, 100, 95, 0.08);
+        border-radius: 0.55rem;
+    }
+
+    /* 活跃会话整行：浅红色背景 */
+    [class*="st-key-session_row_"]:has(.session-row-active-marker) {
+        background: rgba(150, 30, 30, 0.10);
+        border-radius: 0.55rem;
+    }
+    [class*="st-key-session_row_"]:has(.session-row-active-marker):hover {
+        background: rgba(150, 30, 30, 0.14);
+    }
+
+    /* 标题按钮：透明、无边框、左对齐+垂直居中 */
+    [class*="st-key-session_row_"] [class*="st-key-switch_"] button,
+    [class*="st-key-session_row_"] [class*="st-key-switch_"] button:hover,
+    [class*="st-key-session_row_"] [class*="st-key-switch_"] button:focus,
+    [class*="st-key-session_row_"] [class*="st-key-switch_"] button:focus-visible,
+    [class*="st-key-session_row_"] [class*="st-key-switch_"] button:active {
+        background: transparent !important;
+        border: none !important;
+        outline: none !important;
+        box-shadow: none !important;
+    }
+
+    [class*="st-key-session_row_"] [class*="st-key-switch_"] button {
+        padding: 0.42rem 0.6rem !important;
+        min-height: auto !important;
+        height: auto !important;
+        text-align: left !important;
+        color: var(--ink-900, #2A1F1D) !important;
+        font-weight: 400 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: flex-start !important;
+    }
+
+    [class*="st-key-session_row_"] [class*="st-key-switch_"] button:hover {
+        color: var(--brand-red) !important;
+    }
+
+    [class*="st-key-session_row_"] [class*="st-key-switch_"] button > div {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: flex-start !important;
+        gap: 0 !important;
+        width: 100%;
+    }
+
+    [class*="st-key-session_row_"] [class*="st-key-switch_"] button p {
+        margin: 0 !important;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: 0.92rem !important;
+        line-height: 1.2;
+    }
+
+    /* 活跃会话标题加粗 + 深红 */
+    [class*="st-key-session_row_"]:has(.session-row-active-marker) [class*="st-key-switch_"] button p {
+        font-weight: 700 !important;
+        color: var(--brand-red) !important;
+    }
+
+    /* 隐藏 popover trigger 的下拉箭头（chevron），只保留 ⋯ 图标 */
+    [class*="st-key-session_row_"] [data-testid="stPopover"] button svg {
+        display: none !important;
     }
 
     /* 三点 popover trigger：默认隐藏，hover 行时显示 */
@@ -1827,15 +1919,20 @@ with st.sidebar:
         for sid, sess in unarchived_sessions:
             title = sess.get("title", sid)
             is_active = (sid == st.session_state.active_session_id)
-            label = f"▶ {title}" if is_active else title
+            row_class = "session-row-active" if is_active else "session-row"
             with st.container(key=f"session_row_{sid}"):
+                # 注入 marker class 让 CSS 区分活跃 / 非活跃
+                st.markdown(
+                    f'<div class="{row_class}-marker" style="display:none"></div>',
+                    unsafe_allow_html=True,
+                )
                 col_t, col_m = st.columns([0.84, 0.16])
                 with col_t:
                     if st.button(
-                        label,
+                        title,
                         key=f"switch_{sid}",
                         use_container_width=True,
-                        type="secondary" if is_active else "tertiary",
+                        type="tertiary",
                     ):
                         _switch_session(sid)
                         st.rerun()
