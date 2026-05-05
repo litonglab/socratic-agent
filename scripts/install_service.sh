@@ -28,7 +28,7 @@ chmod +x "$ROOT_DIR/scripts/start_all.sh"
 # ---------- 生成服务文件（自动填入路径/用户） ----------
 cat > /tmp/${SERVICE_NAME}.service <<EOF
 [Unit]
-Description=RAG Agent (FastAPI + Streamlit)
+Description=RAG Agent (FastAPI backend)
 After=network-online.target
 Wants=network-online.target
 

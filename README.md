@@ -31,11 +31,15 @@ pip install -U pip
 pip install -r requirements.txt
 ```
 
-如果你需要在 Streamlit 聊天中上传图片并做 OCR，建议额外安装：
+前端运行需要 Node.js（建议 18 LTS 及以上）与 npm。
+
+如果你需要支持"在前端上传图片并做 OCR"，建议额外安装：
 
 ```bash
 pip install rapidocr-onnxruntime
 ```
+
+不安装也不会影响纯文本问答；只有当前端上传图片、后端 `vision` 模块尝试做 OCR 时才会用到。
 
 ### 2) 配置环境变量
 
@@ -66,7 +70,6 @@ cp .env.example .env
 | `TOPO_DEFAULT_EXPERIMENT_ID` | 空 | 问题未带实验号时的默认实验 |
 | `MAX_CHAT_CONCURRENCY` | `50` | 聊天并发上限 |
 | `CORS_ALLOWED_ORIGINS` | `*` | FastAPI 跨域白名单 |
-| `PERSIST_PATH` | `sessions.json` | Streamlit 本地会话落盘路径 |
 | `HF_ENDPOINT` | 空 | HuggingFace 镜像地址（网络不稳定时可配） |
 
 说明：`.env.example` 里的 `BACKEND_BASE_URL` 当前版本未被核心代码使用，可保留不动。
@@ -81,7 +84,9 @@ cp .env.example .env
 export RAG_REBUILD_INDEX=1
 ```
 
-### 4) 启动服务
+### 4) 启动后端
+
+后端是 FastAPI（`server.py`），下面三种方式按需选用，**都只启后端**，前端在第 5) 节单独启动。
 
 开发模式（推荐）：
 
@@ -89,8 +94,8 @@ export RAG_REBUILD_INDEX=1
 bash scripts/start_dev.sh
 ```
 
-- 启动 `uvicorn --reload` 与 Streamlit。
-- 默认开启 `RAG_DEV_FAST_START=1`，后端会先可访问，再后台预热 RAG。
+- 启动 `uvicorn --reload`，监听 `http://127.0.0.1:8000`。
+- 默认开启 `RAG_DEV_FAST_START=1`，后端先可访问，再后台预热 RAG（第一次请求会冷启动，第二次起明显变快）。
 
 稳定模式（演示或部署前自测）：
 
@@ -98,20 +103,51 @@ bash scripts/start_dev.sh
 bash scripts/start_all.sh
 ```
 
-- 启动后端并等待健康检查通过，再拉起 Streamlit。
-- 默认后端端口 `8000`，Streamlit 端口 `8501`。
+- uvicorn lifespan 阻塞直到 RAG 就绪后才开放端口，因此 `/health` 通过即代表服务可用。
+- 默认后端端口 `8000`。
 
-也可分开启动：
+适合 WSL 的启动方法：
 
-```bash
-uvicorn server:app --reload --port 8000
-streamlit run app_streamlit.py
-```
-
-适合wsl的启动方法：
 ```bash
 cd ~/socratic-agent
 bash scripts/start_wsl.sh
+```
+
+- 自动加载 `.venv` 与 `.env`，优先使用本地 embedding 目录（`models/bge-m3`），默认禁用 reranker。
+- 监听 `0.0.0.0:8000`，方便从 Windows 主机访问。
+
+如果你只想直接调原生命令：
+
+```bash
+uvicorn server:app --reload --port 8000
+```
+
+### 5) 启动前端（React + Vite）
+
+前端代码在 `frontend/` 目录，使用 React 19 + Vite + TailwindCSS。**首次运行**：
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+- 默认监听 `http://localhost:5173`。
+- Vite 已配好开发代理：`/api` 与 `/health` 自动转发到 `http://localhost:8000`，无需改任何 URL。
+- 因此通常的开发组合是两个终端：终端 A 跑 `bash scripts/start_dev.sh`（后端），终端 B 跑 `npm run dev`（前端）。
+
+WSL / 远程主机想从其他设备访问，加 `--host`：
+
+```bash
+npm run dev -- --host
+```
+
+生产构建：
+
+```bash
+cd frontend
+npm run build      # 产物在 dist/，由 Nginx 或 FastAPI 反代静态文件即可
+npm run preview    # 本地预览生产构建（仅自测用）
 ```
 
 ## API 速查
@@ -166,7 +202,7 @@ bash scripts/start_wsl.sh
 
 ## MCP 支持
 
-项目新增了一个只读的 MCP Server，便于在 Cursor、Claude Desktop 或其他支持 MCP 的客户端中复用仓库内的稳定能力，而不影响现有 `FastAPI + Streamlit` 主链路。
+项目新增了一个只读的 MCP Server，便于在 Cursor、Claude Desktop 或其他支持 MCP 的客户端中复用仓库内的稳定能力，而不影响现有 `FastAPI + React` 主链路。
 
 当前开放的工具包括：
 
@@ -293,9 +329,16 @@ RAG-Agent/
 │   ├── topo_models.py
 │   ├── llm_config.py
 │   ├── vision.py
+│   ├── chat_format.py
 │   └── web_search.py
+├── frontend/                  # React 19 + Vite + TailwindCSS 前端
+│   ├── src/
+│   │   ├── pages/             # ChatPage / LoginPage
+│   │   ├── components/        # 消息流、输入框、侧栏、徽标、Toast 等
+│   │   ├── lib/               # 与后端的 fetch + SSE 客户端
+│   │   └── hooks/             # 鉴权 hook
+│   └── package.json
 ├── mcp_server/                 # MCP 服务层，暴露只读工具
-├── components/                # Streamlit 自定义输入组件
 ├── storage/                   # 用户、会话、反馈、画像等存储逻辑
 ├── scripts/                   # 启动与部署脚本（含 MCP 启动脚本）
 ├── eval/                      # 评测与对比实验脚本
@@ -303,13 +346,12 @@ RAG-Agent/
 ├── faiss_index/               # 向量索引
 ├── topo_store/                # 拓扑结构化产物
 ├── data_store/                # SQLite 数据文件
-├── server.py                  # FastAPI API
-└── app_streamlit.py           # Streamlit UI
+└── server.py                  # FastAPI API
 ```
 
 ## 论文对齐与实验结论（V4）
 
-本仓库与论文稿的系统设计基本对齐，核心对应关系可以概括为：检索层做细粒度优化，教学层做分层苏格拉底引导，系统层以 FastAPI + Streamlit 形成可运行原型。
+本仓库与论文稿的系统设计基本对齐，核心对应关系可以概括为：检索层做细粒度优化，教学层做分层苏格拉底引导，系统层以 FastAPI + React 形成可运行原型。
 
 ### 研究问题
 
@@ -321,13 +363,13 @@ RAG-Agent/
 
 - 方案一（检索层）：基于“问题类型 + 提示层级”做细粒度检索优化，组合 `BM25 + Dense + RRF + CrossEncoderReranker`，并引入拓扑结构化上下文增强实验问答。
 - 方案二（教学层）：构建多场景、多层级苏格拉底提示策略，将实验问题分类后执行分层引导，`hint_level` 按 `MAINTAIN / INCREASE / JUMP_TO_MAX` 动态更新。
-- 方案三（系统层）：实现个性化教学 Agent 原型，集成 `FastAPI + Streamlit + SSE`、会话状态、反馈与水平估计模块，并通过对比、消融和案例分析进行验证。
+- 方案三（系统层）：实现个性化教学 Agent 原型，集成 `FastAPI + React + SSE`、会话状态、反馈与水平估计模块，并通过对比、消融和案例分析进行验证。
 
 ### 设计对齐摘要
 
 - 检索层：按问题类别与 `hint_level` 调整检索参数，组合 `BM25 + Dense + RRF + CrossEncoderReranker`。
 - 教学层：采用多场景分层提示策略，`hint_level` 按 `MAINTAIN / INCREASE / JUMP_TO_MAX` 动态更新。
-- 系统层：支持 `SSE` 流式输出、会话状态管理、反馈闭环与水平估计。
+- 系统层：FastAPI 后端 + React 前端，支持 `SSE` 流式输出、会话状态管理、反馈闭环与水平估计。
 
 ### 论文中的实验配置（摘录）
 
@@ -349,9 +391,13 @@ RAG-Agent/
 
 `/api/chat` 是鉴权接口，先调用登录/注册拿到 token，再在请求头带 `Authorization: Bearer <token>`。
 
-### 3) 提示缺少 OCR 依赖
+### 3) 前端上传图片后报 OCR 相关错误
 
-安装 `rapidocr-onnxruntime`，该依赖在上传图片并执行 OCR 时会被调用。
+后端 `agentic_rag/vision.py` 在收到图片时会尝试做 OCR，依赖 `rapidocr-onnxruntime`。如果只跑文字问答可以忽略；需要 OCR 时安装即可：
+
+```bash
+pip install rapidocr-onnxruntime
+```
 
 ### 4) 拓扑问答提示“未识别到实验编号”
 
@@ -359,10 +405,6 @@ RAG-Agent/
 
 ### 5) 需要只看 API，不跑前端
 
-直接运行：
+任意一种后端启动方式（`bash scripts/start_dev.sh` / `bash scripts/start_all.sh` / `uvicorn server:app --port 8000`）都不会自动拉起前端。Vite 前端只有在你显式 `cd frontend && npm run dev` 时才会启动。
 
-```bash
-uvicorn server:app --port 8000
-```
-
-随后用 Postman 或 `curl` 调 `/api/*` 即可。
+后端独立跑起来后，用 Postman 或 `curl` 调 `/api/*` 即可。

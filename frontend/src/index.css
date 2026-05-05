@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+/* ===== 主题 token（NetRUC 品牌红 + ChatGPT 风灰阶） ===== */
+@theme {
+  --color-brand: #861A11;
+  --color-brand-dark: #6F140C;
+  --color-brand-light: #B54F44;
+
+  --color-ink-900: #2A1F1D;
+  --color-ink-700: #4D3D3A;
+  --color-ink-500: #7B6A68;
+  --color-ink-300: #B5A5A2;
+
+  --color-line-soft: #EFE7E5;
+  --color-line-mid: #D8CECB;
+  --color-line-strong: #C7B9B5;
+
+  --color-surface: #FFFFFF;
+  --color-surface-alt: #FAF6F4;
+  --color-surface-hover: rgba(120, 100, 95, 0.08);
+  --color-surface-active: rgba(150, 30, 30, 0.10);
+}
+
+/* ===== shadcn-ui CSS variables（用 brand 红替换默认蓝） ===== */
+:root {
+  --background: 0 0% 100%;
+  --foreground: 12 25% 14%;
+  --card: 0 0% 100%;
+  --card-foreground: 12 25% 14%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 12 25% 14%;
+  --primary: 5 78% 30%;        /* brand red */
+  --primary-foreground: 0 0% 100%;
+  --secondary: 12 14% 96%;
+  --secondary-foreground: 12 25% 14%;
+  --muted: 12 14% 96%;
+  --muted-foreground: 12 8% 45%;
+  --accent: 12 14% 94%;
+  --accent-foreground: 12 25% 14%;
+  --destructive: 0 75% 42%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 12 14% 88%;
+  --input: 12 14% 88%;
+  --ring: 5 78% 30%;
+  --radius: 0.65rem;
+}
+
+/* ===== 全局基础样式 ===== */
+html, body, #root {
+  height: 100%;
+}
+
+html {
+  /* 提升整体可读性：把基准字号从 16 提到 16.5（1rem 仍 16，所以不影响 tailwind 数值） */
+  font-size: 16px;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  background: linear-gradient(180deg, #FAF5F3 0%, #F1E8E4 100%);
+  color: var(--color-ink-900);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 100, 95, 0.35);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(120, 100, 95, 0.55); }
+::-webkit-scrollbar-track { background: transparent; }

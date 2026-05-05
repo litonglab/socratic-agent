@@ -13,7 +13,7 @@
 #   journalctl -u rag-agent -f           # 实时查看日志
 
 [Unit]
-Description=RAG Agent (FastAPI + Streamlit)
+Description=RAG Agent (FastAPI backend)
 After=network-online.target
 Wants=network-online.target
 
