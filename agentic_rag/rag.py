@@ -63,7 +63,7 @@ text_splitter = RecursiveCharacterTextSplitter(
 # 7. 教学意图感知检索策略参数表
 _RETRIEVAL_PARAMS: dict = {
     "THEORY_CONCEPT":      {"low": (40, 4), "high": (40, 6)},
-    "LAB_TROUBLESHOOTING": {"low": (25, 3), "high": (30, 4)},
+    "LAB_TROUBLESHOOTING": {"low": (30, 4), "high": (30, 4)},
     "CONFIG_REVIEW":       {"low": (25, 3), "high": (30, 5)},
     "CALCULATION":         {"low": (20, 3), "high": (20, 4)},
 }
@@ -278,21 +278,14 @@ def _ensure_rag_initialized():
 
         print("[RAG] 开始初始化...")
 
-        # 1. 嵌入模型
-        print(f"[RAG] 加载 Embedding 模型：{embedding_model_name} ...")
-        embeddings = HuggingFaceEmbeddings(
-            model_name=embedding_model_name,
-            encode_kwargs={"normalize_embeddings": True},
-        )
-
-        # 2. 优先复用 index 对应的 chunks，确保 BM25 与 Dense 使用同一套文档块
+        # 1. 优先复用 index 对应的 chunks，确保 BM25 与 Dense 使用同一套文档块
         chunks = None
         if not rebuild_index and index_dir.exists():
             chunks = _load_chunks_from_index(index_dir)
             if chunks:
                 print(f"[RAG] 从 {index_dir / 'chunks.pkl'} 加载运行时 chunks，共 {len(chunks)} 个")
 
-        # 3. 如果需要，再从 docx 重新切分并构建索引
+        # 2. 如果需要，再从 docx 重新切分
         if chunks is None:
             docx_files = sorted(DATA_DIR.glob("*.docx"))
             if not docx_files:
@@ -313,31 +306,61 @@ def _ensure_rag_initialized():
 
         _loaded_chunks = chunks
 
-        # 4. 构建或加载 FAISS
-        if rebuild_index or not index_dir.exists():
-            print("[RAG] 正在构建 FAISS 索引...")
-            vectorstore = FAISS.from_documents(chunks, embeddings)
-            index_dir.mkdir(parents=True, exist_ok=True)
-            vectorstore.save_local(index_dir)
-            with open(index_dir / "chunks.pkl", "wb") as f:
-                pickle.dump(chunks, f)
-            print(f"[RAG] 向量索引已保存到 {index_dir}/")
+        # 3 & 4 并行：Embedding+FAISS 与 Reranker 互相独立，同时加载
+        _emb_error: List[BaseException] = []
+        _rnk_error: List[BaseException] = []
+        _vectorstore_box: List = [None]
+        _reranker_box: List = [None]
 
-        _loaded_vectorstore = FAISS.load_local(
-            index_dir,
-            embeddings,
-            allow_dangerous_deserialization=True,
-        )
-        print("[RAG] FAISS 索引加载完成")
+        def _load_embedding_and_faiss():
+            try:
+                print(f"[RAG] 加载 Embedding 模型：{embedding_model_name} ...")
+                emb = HuggingFaceEmbeddings(
+                    model_name=embedding_model_name,
+                    encode_kwargs={"normalize_embeddings": True},
+                )
+                if rebuild_index or not index_dir.exists():
+                    print("[RAG] 正在构建 FAISS 索引...")
+                    vs = FAISS.from_documents(chunks, emb)
+                    index_dir.mkdir(parents=True, exist_ok=True)
+                    vs.save_local(index_dir)
+                    with open(index_dir / "chunks.pkl", "wb") as f:
+                        pickle.dump(chunks, f)
+                    print(f"[RAG] 向量索引已保存到 {index_dir}/")
+                _vectorstore_box[0] = FAISS.load_local(
+                    index_dir, emb, allow_dangerous_deserialization=True
+                )
+                print("[RAG] FAISS 索引加载完成")
+            except BaseException as exc:  # noqa: BLE001
+                _emb_error.append(exc)
 
-        # 5. Reranker
+        def _load_reranker():
+            try:
+                print(f"[RAG] 加载 Reranker 模型：{reranker_model_name} ...")
+                _reranker_box[0] = HuggingFaceCrossEncoder(model_name=reranker_model_name)
+                print("[RAG] Reranker 加载完成")
+            except BaseException as exc:  # noqa: BLE001
+                _rnk_error.append(exc)
+
+        t_emb = threading.Thread(target=_load_embedding_and_faiss, daemon=True, name="rag-emb")
+        t_emb.start()
+
         if not disable_reranker:
-            print(f"[RAG] 加载 Reranker 模型：{reranker_model_name} ...")
-            _cross_encoder = HuggingFaceCrossEncoder(model_name=reranker_model_name)
-            print("[RAG] Reranker 加载完成")
+            t_rnk = threading.Thread(target=_load_reranker, daemon=True, name="rag-reranker")
+            t_rnk.start()
+            t_rnk.join()
         else:
-            _cross_encoder = None
             print("[RAG] Reranker 已禁用，使用 Hybrid 检索")
+
+        t_emb.join()
+
+        if _emb_error:
+            raise _emb_error[0]
+        if _rnk_error:
+            raise _rnk_error[0]
+
+        _loaded_vectorstore = _vectorstore_box[0]
+        _cross_encoder = _reranker_box[0]
 
         _initialized = True
         print("[RAG] 初始化完成")

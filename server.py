@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import hashlib
 import json
 import os
 import threading
@@ -25,7 +26,13 @@ from pydantic import BaseModel
 from langchain_core.messages import SystemMessage, HumanMessage
 
 # import your agent entrypoints
-from agentic_rag.agent import query, query_stream, dicts_to_messages, messages_to_dicts
+from agentic_rag.agent import (
+    query,
+    query_stream,
+    dicts_to_messages,
+    messages_to_dicts,
+    _detect_lab4_section,
+)
 from agentic_rag.chat_format import split_visible_and_thinking
 from agentic_rag.llm_config import build_chat_llm
 from storage.auth import validate_password, validate_username, hash_password
@@ -77,6 +84,71 @@ _LEGACY_SESSION_USER_ID = "__legacy__"
 _LEGACY_SESSIONS: Dict[str, List[Dict[str, str]]] = {}
 _LEGACY_SESSION_STATES: Dict[str, Dict[str, Any]] = {}
 _LEGACY_STORE_LOCK = threading.Lock()
+
+
+def _anonymize_session_id(session_id: str) -> str:
+    raw = (session_id or "").strip()
+    if not raw:
+        return "s_unknown"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return f"s_{digest}"
+
+
+def _infer_lab4_problem_type(question: str, section: Optional[str]) -> Optional[str]:
+    """基于轻量关键词推断实验4问题类型，仅用于课堂评估日志标签。"""
+    q = (question or "").strip().lower()
+    if not q:
+        return None
+
+    if section == "4.6_acceptance" or any(k in q for k in ("截图", "验收", "评分", "分值", "要交", "提交")):
+        return "screenshot_acceptance"
+    if any(k in q for k in ("报错", "失败", "不通", "连不上", "怎么办", "error", "file exists", "noqueue")):
+        return "troubleshooting"
+    if any(k in q for k in ("命令", "怎么做", "怎么写", "怎么配", "如何", "步骤", "参数", "-u", "-b")):
+        return "command_execution"
+    if any(k in q for k in ("报告", "分析", "总结", "规律", "简述", "为什么不是刚好")):
+        return "report_analysis"
+    if any(k in q for k in ("为什么", "结果", "差异", "不一样", "增加", "变化", "rtt")):
+        return "phenomenon_explanation"
+    if any(k in q for k in ("是什么", "区别", "作用", "入口", "出口", "怎么看", "含义", "什么意思")):
+        return "concept_explanation"
+    return None
+
+
+def _append_classroom_eval_light_log(
+    *,
+    user_id: str,
+    session_id: str,
+    latency_ms: int,
+    status: str,
+    sse_completed: bool,
+    input_chars: int,
+    state: Optional[Dict[str, Any]],
+    question: str,
+) -> None:
+    """课堂试用轻量日志：不记录原始问答文本，仅记录匿名标签与基础指标。"""
+    payload: Dict[str, Any] = {
+        "session_id": _anonymize_session_id(session_id),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "latency_ms": max(0, int(latency_ms)),
+        "status": status,
+        "sse_completed": bool(sse_completed),
+        "input_chars": max(0, int(input_chars)),
+    }
+
+    st = state or {}
+    if st.get("experiment_id") == "lab4":
+        lab_section = st.get("lab_section") or _detect_lab4_section(question)
+        problem_type = st.get("problem_type") or _infer_lab4_problem_type(question, lab_section)
+        if lab_section:
+            payload["lab_section"] = lab_section
+        if problem_type:
+            payload["problem_type"] = problem_type
+
+    try:
+        append_log(user_id, "classroom_eval_light", json.dumps(payload, ensure_ascii=False))
+    except Exception as exc:
+        print(f"[Warning] classroom_eval_light log failed: {exc}")
 
 
 def get_summary_llm():
@@ -940,18 +1012,35 @@ def create_app() -> FastAPI:
         _acquire_chat_slot()
 
         def event_stream():
+            stream_started_at = time.perf_counter()
+            trace_state: Dict[str, Any] = {}
+            trace_user_id = user["id"] if user else _LEGACY_SESSION_USER_ID
+            trace_sid = req.session_id or f"s_{uuid4().hex[:10]}"
             try:
                 if user is None:
                     # legacy 路径行为保持不变：把 enriched_message 临时塞回 req.message 后再走老逻辑
                     saved = req.message
+                    saved_sid = req.session_id
                     req.message = enriched_message
+                    req.session_id = trace_sid
                     try:
                         yield from _legacy_chat_stream_events(req)
                     finally:
                         req.message = saved
+                        req.session_id = saved_sid
+                    _append_classroom_eval_light_log(
+                        user_id=trace_user_id,
+                        session_id=trace_sid,
+                        latency_ms=int((time.perf_counter() - stream_started_at) * 1000),
+                        status="ok",
+                        sse_completed=True,
+                        input_chars=len(original_user_message or ""),
+                        state=trace_state,
+                        question=original_user_message,
+                    )
                     return
                 user_id = user["id"]
-                sid = req.session_id or f"s_{uuid4().hex[:10]}"
+                sid = trace_sid
                 with _hold_session_lock(user_id, sid):
                     message_id = f"m_{uuid4().hex[:12]}"
 
@@ -1002,6 +1091,7 @@ def create_app() -> FastAPI:
                             final_result = event["result"]
                             final_tool_traces = event["tool_traces"]
                             final_state = event["state"]
+                            trace_state = final_state or {}
                             final_thinking_full = event.get("thinking_full") or ""
 
                     visible_reply, thinking = split_visible_and_thinking(final_result)
@@ -1088,7 +1178,27 @@ def create_app() -> FastAPI:
                         state=final_state or {},
                         traces=final_tool_traces,
                     )
+                    _append_classroom_eval_light_log(
+                        user_id=trace_user_id,
+                        session_id=trace_sid,
+                        latency_ms=int((time.perf_counter() - stream_started_at) * 1000),
+                        status="ok",
+                        sse_completed=True,
+                        input_chars=len(original_user_message or ""),
+                        state=trace_state,
+                        question=original_user_message,
+                    )
             except Exception as exc:
+                _append_classroom_eval_light_log(
+                    user_id=trace_user_id,
+                    session_id=trace_sid,
+                    latency_ms=int((time.perf_counter() - stream_started_at) * 1000),
+                    status="error",
+                    sse_completed=False,
+                    input_chars=len(original_user_message or ""),
+                    state=trace_state,
+                    question=original_user_message,
+                )
                 yield _sse_event("error", {"detail": str(exc)})
                 yield _sse_event("done", {"ok": False})
             finally:

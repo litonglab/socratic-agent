@@ -59,6 +59,7 @@ from .prompts import (
     STRATEGY_CALC,
     UNIFIED_CLASSIFICATION_PROMPT,
     BASE_PROMPT_GENERAL,
+    LAB4_SPECIALIST_GUIDANCE,
 )
 
 # topo_rag 依赖 PIL / python-docx / OpenAI 等组件，延迟导入避免拖慢启动
@@ -168,6 +169,52 @@ _TOOL_API_NAME_MAP = {
     "拓扑": "topology_retrieve",
     "搜索": "web_search",
 }
+
+# ── 实验4 小节检测与 query 增强 ──────────────────────────────────────────────
+# 关键词按优先级排列：越具体、歧义越小的放越前面。
+# "tc" 太通用，不单独匹配，改用 "netem" / "qdisc" / "tc qdisc" 等精准词。
+_LAB4_SECTION_KEYWORDS: Dict[str, List[str]] = {
+    "4.6_acceptance": ["截图", "验收", "要交", "交什么", "提交", "分析与总结", "实验报告"],
+    "4.3_mahimahi":   ["mahimahi", "mm-delay", "mm-loss", "mm-link", "trace文件",
+                       "0.6mbps", "24mbps", "0.6m", "24m", "1500字节", "虚拟管道"],
+    "4.4_mininet":    ["mininet", "sudo mn", "pingall", "xterm", "h1 ping", "h2 ping",
+                       "特定链路", "节点", "nodes", "net dump"],
+    "4.1_iperf":      ["iperf", "bandwidth", "jitter", "datagrams", "吞吐", "抖动"],
+    "4.2_tc":         ["netem", "qdisc", "tc netem", "tc qdisc", "ens33", "loopback",
+                       "发送方向", "出口方向", "入口方向", "步骤二", "步骤三", "步骤六",
+                       "lo 网卡", "lo上", "lo 上", "lo加", "rtt"],
+}
+
+_LAB4_SECTION_AUGMENTATION: Dict[str, str] = {
+    "4.1_iperf":    ("实验4 网络仿真工具 4.1 iperf3 TCP UDP Bandwidth Jitter "
+                     "Lost/Total Datagrams 实验结果分析与总结 原问题："),
+    "4.2_tc":       ("实验4 网络仿真工具 4.2 TC netem lo ens33 eth0 qdisc delay loss "
+                     "发送方向 RTT 步骤二 步骤三 步骤六 原问题："),
+    "4.3_mahimahi": ("实验4 网络仿真工具 4.3 Mahimahi mm-delay mm-loss mm-link trace "
+                     "1500字节 12Kb 0.6Mbps 24Mbps 原问题："),
+    "4.4_mininet":  ("实验4 网络仿真工具 4.4 Mininet sudo mn nodes net dump pingall "
+                     "xterm tc iperf 特定链路 TCP带宽 原问题："),
+    "4.6_acceptance": ("实验4 网络仿真工具 4.6 验收标准 截图要求 实验报告 "
+                       "实验结果分析与总结 原问题："),
+}
+
+_LAB4_GENERAL_PREFIX = "实验4 网络仿真工具 iperf3 tc netem Mahimahi Mininet 原问题："
+
+
+def _detect_lab4_section(query: str) -> Optional[str]:
+    """检测实验4 query 所属小节，返回 section key；无法识别时返回 None。"""
+    q_low = (query or "").lower()
+    for section, keywords in _LAB4_SECTION_KEYWORDS.items():
+        if any(kw.lower() in q_low for kw in keywords):
+            return section
+    return None
+
+
+def _augment_lab4_query(query: str) -> str:
+    """对实验4检索 query 做轻量 prefix 增强，保留原问题文本不变。"""
+    section = _detect_lab4_section(query)
+    prefix = _LAB4_SECTION_AUGMENTATION.get(section, _LAB4_GENERAL_PREFIX) if section else _LAB4_GENERAL_PREFIX
+    return f"{prefix}{query}"
 
 
 @dataclass(frozen=True)
@@ -967,8 +1014,14 @@ def _prepare_context(
             final_prompt += f"\n\n【学生水平参考】\n{prof_summary}"
 
     # 构建工具表（需要在 prompt 生成之前完成，prompt 会引用工具名）
-    def _rag_with_context(msg: str):
-        return RAGAgent(msg, category=category, hint_level=current_hint_level)
+    # 实验4会话：对检索 query 做小节 prefix 增强，提升实验4文档召回率
+    if experiment_id == "lab4":
+        def _rag_with_context(msg: str):
+            augmented = _augment_lab4_query(msg)
+            return RAGAgent(augmented, category=category, hint_level=current_hint_level)
+    else:
+        def _rag_with_context(msg: str):
+            return RAGAgent(msg, category=category, hint_level=current_hint_level)
 
     contextual_actions = {
         "检索": _rag_with_context,
@@ -978,11 +1031,24 @@ def _prepare_context(
         contextual_actions["搜索"] = WebSearch
 
     if experiment_id and experiment_label:
-        final_prompt += (
-            f"\n\n【实验上下文】\n"
-            f"当前会话已识别为 {experiment_label}（{experiment_id}）。"
-            f"如果需要调用拓扑工具，只使用该实验下审核通过的拓扑 JSON，不要混用其他实验数据。"
-        )
+        if experiment_id == "lab4":
+            # 实验4无结构化拓扑数据，不提示调用拓扑工具
+            final_prompt += (
+                f"\n\n【实验上下文】\n"
+                f"当前会话已识别为 {experiment_label}（{experiment_id}）。"
+                f"实验4使用 iperf3 / tc netem / Mahimahi / Mininet 等仿真工具，"
+                f"其拓扑描述为数据流文字图，无结构化拓扑 JSON，请勿调用拓扑工具。"
+            )
+        else:
+            final_prompt += (
+                f"\n\n【实验上下文】\n"
+                f"当前会话已识别为 {experiment_label}（{experiment_id}）。"
+                f"如果需要调用拓扑工具，只使用该实验下审核通过的拓扑 JSON，不要混用其他实验数据。"
+            )
+
+    # 实验4专项策略注入：仅当识别到 lab4 时追加，不影响其他实验
+    if experiment_id == "lab4":
+        final_prompt += LAB4_SPECIALIST_GUIDANCE
 
     tool_descriptions = {
         "检索": "从课程实验指导书中检索相关段落，返回带引用标注的文档证据。",
