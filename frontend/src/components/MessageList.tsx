@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { ThumbsUp, ThumbsDown, ChevronDown, ChevronRight, Brain } from "lucide-react"
+import { ThumbsUp, ThumbsDown, ChevronDown, ChevronRight, Brain, Loader2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import Markdown from "./Markdown"
 
@@ -56,57 +56,78 @@ function MessageRow({
 }) {
   const [thinkOpen, setThinkOpen] = useState(false)
   const isUser = m.role === "user"
+  // 流式且还没开始输出最终回答时，显示"正在思考中"占位
+  // （后端的 thinking 仅在 done 事件返回，无法流式增量）
+  const showThinkingHint = !isUser && m.pending && !m.content
+  // 是否渲染气泡：用户消息始终渲染；assistant 仅在有内容、或非 pending 时渲染
+  // （避免"正在思考中"下面跟一个空气泡）
+  const showBubble = isUser || !!m.content || !m.pending
 
   return (
     <div className={cn("flex flex-col", isUser ? "items-end" : "items-start")}>
-      <div
-        className={cn(
-          "max-w-[82%] rounded-2xl px-4 py-3 text-sm shadow-sm",
-          isUser
-            ? "bg-[hsl(var(--primary))] text-white"
-            : "bg-white border border-[hsl(var(--border))]",
-          m.pending && "opacity-90",
-        )}
-      >
-        {/* 用户附带图片 */}
-        {isUser && m.images && m.images.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-2">
-            {m.images.map((src, idx) => (
-              <img
-                key={idx}
-                src={src}
-                alt={`uploaded-${idx}`}
-                className="max-w-[180px] max-h-[180px] rounded-lg border border-white/30"
-              />
-            ))}
-          </div>
-        )}
+      {/* assistant 思考区：放在气泡上方，浅灰斜体，无背景无边框，避免被误认为最终回答 */}
+      {showThinkingHint && (
+        <div className="flex items-center gap-1.5 text-xs italic text-[hsl(var(--muted-foreground))] mb-1.5 px-1">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          <span>正在思考中…</span>
+        </div>
+      )}
+      {!isUser && !m.pending && m.thinking && (
+        <button
+          type="button"
+          className="flex items-center gap-1 text-xs italic text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--primary))] mb-1 px-1"
+          onClick={() => setThinkOpen((v) => !v)}
+        >
+          {thinkOpen ? (
+            <ChevronDown className="w-3.5 h-3.5" />
+          ) : (
+            <ChevronRight className="w-3.5 h-3.5" />
+          )}
+          <Brain className="w-3.5 h-3.5" />
+          <span>思考过程</span>
+        </button>
+      )}
+      {!isUser && !m.pending && m.thinking && thinkOpen && (
+        <div className="max-w-[82%] mb-2 px-1">
+          <Markdown
+            content={m.thinking}
+            className="text-xs italic text-[hsl(var(--muted-foreground))]"
+          />
+        </div>
+      )}
 
-        {/* assistant 思考过程折叠 */}
-        {!isUser && m.thinking && (
-          <button
-            type="button"
-            className="flex items-center gap-1 text-xs text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--primary))] mb-1.5"
-            onClick={() => setThinkOpen((v) => !v)}
-          >
-            {thinkOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-            <Brain className="w-3.5 h-3.5" />
-            思考过程
-          </button>
-        )}
-        {!isUser && m.thinking && thinkOpen && (
-          <div className="mb-2 px-2.5 py-2 rounded-md bg-[#FAF6F4] border border-[hsl(var(--border))]">
-            <Markdown content={m.thinking} className="text-xs text-[hsl(var(--muted-foreground))]" />
-          </div>
-        )}
+      {showBubble && (
+        <div
+          className={cn(
+            "max-w-[82%] rounded-2xl px-4 py-3 text-sm shadow-sm",
+            isUser
+              ? "bg-[hsl(var(--primary))] text-white"
+              : "bg-white border border-[hsl(var(--border))]",
+            m.pending && "opacity-90",
+          )}
+        >
+          {/* 用户附带图片 */}
+          {isUser && m.images && m.images.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-2">
+              {m.images.map((src, idx) => (
+                <img
+                  key={idx}
+                  src={src}
+                  alt={`uploaded-${idx}`}
+                  className="max-w-[180px] max-h-[180px] rounded-lg border border-white/30"
+                />
+              ))}
+            </div>
+          )}
 
-        {/* 正文 */}
-        {m.content ? (
-          <Markdown content={m.content} inverse={isUser} />
-        ) : m.pending ? (
-          <div className="text-xs italic opacity-70">正在生成…</div>
-        ) : null}
-      </div>
+          {/* 正文 */}
+          {m.content ? (
+            <Markdown content={m.content} inverse={isUser} />
+          ) : m.pending ? (
+            <div className="text-xs italic opacity-70">正在生成…</div>
+          ) : null}
+        </div>
+      )}
 
       {/* assistant 反馈按钮 */}
       {!isUser && !m.pending && m.message_id && onFeedback && (

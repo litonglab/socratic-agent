@@ -1,4 +1,4 @@
-import { Edit3, MoreHorizontal, Archive, Trash2 } from "lucide-react"
+import { Edit3, MoreHorizontal, Archive, Trash2, PanelLeftClose } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -16,22 +16,44 @@ interface Props {
   onArchive: (id: string) => void
   onUnarchive: (id: string) => void
   onLogout: () => void
+  onCollapse?: () => void
 }
 
 export default function Sidebar(props: Props) {
-  const { user, sessions, activeId, onNew, onSelect, onDelete, onArchive, onUnarchive, onLogout } =
-    props
+  const {
+    user,
+    sessions,
+    activeId,
+    onNew,
+    onSelect,
+    onDelete,
+    onArchive,
+    onUnarchive,
+    onLogout,
+    onCollapse,
+  } = props
   const visible = sessions.filter((s) => !s.archived)
   const archived = sessions.filter((s) => !!s.archived)
 
   return (
     <aside className="h-full flex flex-col bg-white/96 border-r border-[hsl(var(--border))]">
-      {/* 顶部 logo */}
+      {/* 顶部 logo + 折叠按钮 */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-[hsl(var(--border))]">
         <div className="w-9 h-9 rounded-xl bg-gradient-to-b from-[#A42A1E] to-[#861A11] text-white font-extrabold text-lg grid place-items-center shadow-sm">
           N
         </div>
-        <div className="font-bold text-lg text-[hsl(var(--primary))]">NetRUC Agent</div>
+        <div className="font-bold text-lg text-[hsl(var(--primary))] flex-1 min-w-0 truncate">NetRUC Agent</div>
+        {onCollapse && (
+          <button
+            type="button"
+            onClick={onCollapse}
+            className="grid place-items-center w-8 h-8 rounded-md text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--primary))]"
+            title="收起侧栏"
+            aria-label="收起侧栏"
+          >
+            <PanelLeftClose className="w-4 h-4" />
+          </button>
+        )}
       </div>
 
       {/* 新建会话 */}

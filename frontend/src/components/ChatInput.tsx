@@ -92,37 +92,6 @@ export default function ChatInput({ disabled, websearch, onWebsearchChange, onSe
   return (
     <div className="px-6 pb-6">
       <div className="max-w-3xl mx-auto">
-        {/* 联网搜索 chip（输入框上方右对齐） */}
-        <div className="flex justify-end mb-1.5">
-          <button
-            type="button"
-            onClick={() => onWebsearchChange(!websearch)}
-            className={cn(
-              "inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition-colors",
-              websearch
-                ? "bg-[hsl(var(--primary)/0.10)] border-[hsl(var(--primary)/0.35)] text-[hsl(var(--primary))]"
-                : "bg-white border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary)/0.4)] hover:text-[hsl(var(--primary))]",
-            )}
-            title={websearch ? "联网搜索：已开启" : "联网搜索：未开启"}
-          >
-            <Globe className="w-3.5 h-3.5" />
-            联网搜索
-            <span
-              className={cn(
-                "ml-0.5 inline-block w-7 h-3.5 rounded-full transition-colors relative",
-                websearch ? "bg-[hsl(var(--primary))]" : "bg-[hsl(var(--border))]",
-              )}
-            >
-              <span
-                className={cn(
-                  "absolute top-0.5 left-0.5 w-2.5 h-2.5 rounded-full bg-white transition-transform",
-                  websearch && "translate-x-3.5",
-                )}
-              />
-            </span>
-          </button>
-        </div>
-
         {/* 错误提示 */}
         {error && (
           <div className="text-xs text-[hsl(var(--destructive))] bg-red-50 border border-red-200 rounded-md px-2 py-1 mb-1.5">
@@ -155,11 +124,24 @@ export default function ChatInput({ disabled, websearch, onWebsearchChange, onSe
             </div>
           )}
 
-          <div className="flex items-end gap-1 px-2 py-2">
+          {/* textarea 独占一行 */}
+          <textarea
+            ref={taRef}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={handleKey}
+            onPaste={onPaste}
+            placeholder="输入你的问题，例如：我对子网划分感到困惑（可粘贴图片）"
+            rows={1}
+            className="block w-full resize-none bg-transparent outline-none text-sm leading-relaxed max-h-[200px] px-3.5 pt-3 pb-1"
+          />
+
+          {/* 工具栏：左侧 Paperclip + 联网搜索 chip，右侧 Send */}
+          <div className="flex items-center gap-1.5 px-2 pb-2">
             <button
               type="button"
               onClick={() => fileRef.current?.click()}
-              className="shrink-0 w-9 h-9 grid place-items-center rounded-lg text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--primary))]"
+              className="shrink-0 w-8 h-8 grid place-items-center rounded-lg text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--primary))]"
               title="上传图片（也可粘贴）"
             >
               <Paperclip className="w-4 h-4" />
@@ -175,16 +157,34 @@ export default function ChatInput({ disabled, websearch, onWebsearchChange, onSe
                 e.target.value = ""
               }}
             />
-            <textarea
-              ref={taRef}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={handleKey}
-              onPaste={onPaste}
-              placeholder="输入你的问题，例如：我对子网划分感到困惑（可粘贴图片）"
-              rows={1}
-              className="flex-1 resize-none bg-transparent outline-none text-sm py-2 leading-relaxed max-h-[200px] px-1"
-            />
+            <button
+              type="button"
+              onClick={() => onWebsearchChange(!websearch)}
+              className={cn(
+                "inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition-colors",
+                websearch
+                  ? "bg-[hsl(var(--primary)/0.10)] border-[hsl(var(--primary)/0.35)] text-[hsl(var(--primary))]"
+                  : "bg-white border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary)/0.4)] hover:text-[hsl(var(--primary))]",
+              )}
+              title={websearch ? "联网搜索：已开启" : "联网搜索：未开启"}
+            >
+              <Globe className="w-3.5 h-3.5" />
+              联网搜索
+              <span
+                className={cn(
+                  "ml-0.5 inline-block w-7 h-3.5 rounded-full transition-colors relative",
+                  websearch ? "bg-[hsl(var(--primary))]" : "bg-[hsl(var(--border))]",
+                )}
+              >
+                <span
+                  className={cn(
+                    "absolute top-0.5 left-0.5 w-2.5 h-2.5 rounded-full bg-white transition-transform",
+                    websearch && "translate-x-3.5",
+                  )}
+                />
+              </span>
+            </button>
+            <div className="flex-1" />
             <Button
               size="icon"
               onClick={submit}

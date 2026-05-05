@@ -169,14 +169,23 @@ export interface ChatStreamRequest {
 }
 
 /**
- * 调用 /api/chat/stream，逐行解析 NDJSON 事件流。
- * 返回一个 async generator，使用 for-await-of 消费。
+ * 调用 /api/chat/stream，按 SSE 协议解析事件流。
+ * 后端格式：
+ *   event: <name>
+ *   data: {...json...}
+ *   <空行>
+ *
+ * name 可能是 meta / delta / done / error。我们把它映射到统一的
+ * StreamEvent { type: name, ...data }。
+ *
+ * 返回 async generator，调用方用 for-await-of 消费。
  */
 export async function* chatStream(req: ChatStreamRequest): AsyncGenerator<StreamEvent> {
   const res = await fetch("/api/chat/stream", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      Accept: "text/event-stream",
       ...authHeaders(),
     },
     body: JSON.stringify(req),
@@ -186,7 +195,9 @@ export async function* chatStream(req: ChatStreamRequest): AsyncGenerator<Stream
     try {
       const data = await res.json()
       if (data?.detail) detail = String(data.detail)
-    } catch {}
+    } catch {
+      // ignore
+    }
     throw new Error(detail)
   }
 
@@ -194,30 +205,66 @@ export async function* chatStream(req: ChatStreamRequest): AsyncGenerator<Stream
   const decoder = new TextDecoder("utf-8")
   let buffer = ""
 
+  function* parseBlocks(buf: string): Generator<StreamEvent> {
+    // SSE 事件以两个换行分隔
+    const blocks = buf.split(/\r?\n\r?\n/)
+    // 注意：最后一个 block 可能不完整，由调用方处理；这里 generator 只产出已完整的
+    for (let i = 0; i < blocks.length - 1; i++) {
+      const block = blocks[i]
+      if (!block.trim()) continue
+      let evName = "message"
+      const dataLines: string[] = []
+      for (const rawLine of block.split(/\r?\n/)) {
+        const line = rawLine.replace(/^\uFEFF/, "")
+        if (line.startsWith("event:")) {
+          evName = line.slice(6).trim()
+        } else if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).trim())
+        }
+        // 注释行（以 ":" 开头）和其它字段忽略
+      }
+      const dataStr = dataLines.join("\n")
+      let data: Record<string, unknown> = {}
+      if (dataStr) {
+        try {
+          data = JSON.parse(dataStr)
+        } catch (err) {
+          console.warn("[chatStream] failed to parse data:", dataStr, err)
+        }
+      }
+      // 兼容：后端把 token 增量叫做 "delta"，前端历史代码判断的是 "token"
+      const type = evName === "delta" ? "token" : (evName as StreamEvent["type"])
+      // 兼容：后端 error 事件用 detail 字段，前端代码读 error
+      const merged: Record<string, unknown> = { ...data }
+      if (type === "error" && !merged.error && merged.detail) {
+        merged.error = merged.detail
+      }
+      yield { type, ...merged } as StreamEvent
+    }
+  }
+
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
 
-    let nl: number
-    while ((nl = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, nl).trim()
-      buffer = buffer.slice(nl + 1)
-      if (!line) continue
-      try {
-        yield JSON.parse(line) as StreamEvent
-      } catch (e) {
-        console.warn("[chatStream] failed to parse line:", line, e)
+    if (buffer.includes("\n\n") || buffer.includes("\r\n\r\n")) {
+      const blocks = buffer.split(/\r?\n\r?\n/)
+      // 保留最后一个未完成的 chunk
+      const incomplete = blocks.pop() || ""
+      const consumed = blocks.join("\n\n") + "\n\n"
+      for (const ev of parseBlocks(consumed)) {
+        yield ev
       }
+      buffer = incomplete
     }
   }
-  // 处理结尾残留
-  const tail = buffer.trim()
-  if (tail) {
-    try {
-      yield JSON.parse(tail) as StreamEvent
-    } catch (e) {
-      console.warn("[chatStream] failed to parse tail:", tail, e)
+
+  // flush 剩余
+  if (buffer.trim()) {
+    const flushed = buffer + "\n\n"
+    for (const ev of parseBlocks(flushed)) {
+      yield ev
     }
   }
 }
