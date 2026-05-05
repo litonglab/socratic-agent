@@ -13,12 +13,14 @@ import {
   Pencil,
   X as XIcon,
   CornerDownLeft,
+  Lightbulb,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import Markdown from "./Markdown"
 import MessageActions, { HintLevelChip } from "./MessageActions"
 import TraceList from "./TraceList"
 import BrandLogo from "./BrandLogo"
+import Lightbox from "./Lightbox"
 import type { ToolTrace, ChatStage, ChatState } from "@/lib/api"
 
 const BOTTOM_THRESHOLD_PX = 80
@@ -41,15 +43,69 @@ export interface ChatMessage {
   // 流式期间的当前阶段（仅在 pending 的助手消息上有意义）
   stage?: ChatStage
   stage_tools?: string[]
+  /** 仅前端维护：思考开始的 performance.now() 时间戳 */
+  thinking_started_at?: number
+  /** 仅前端维护：思考耗时（毫秒），思考结束后写入 */
+  thinking_duration_ms?: number
 }
 
 interface Props {
   messages: ChatMessage[]
+  /** 当前激活的 sessionId：用于按会话缓存滚动位置 */
+  sessionId?: string | null
+  /** 切换会话时正在拉取消息：渲染骨架屏，避免空白闪烁 */
+  loading?: boolean
   onFeedback?: (messageId: string, next: "like" | "dislike" | "cancel") => void
   onRegenerate?: (assistantMessageId: string) => void
   onEditAndResend?: (userMessageIndex: number, newText: string) => void
-  /** 点击空状态的建议提问卡片：将文案填入输入框 */
+  /** 点击空状态的建议提问卡片 / 助手消息底部追问 chip：将文案直接发送 */
   onPickSuggestion?: (text: string) => void
+}
+
+// 按问题类别给出"下一句问什么"的模板。
+// 后端 category 实际取值：LAB_TROUBLESHOOTING / THEORY_CONCEPT / CONFIG_REVIEW / CALCULATION
+const FOLLOW_UPS_BY_CATEGORY: Record<string, string[]> = {
+  THEORY_CONCEPT: [
+    "请举一个具体的例子说明",
+    "和它最容易混淆的相近概念是什么？",
+    "这个概念在实验里是怎么体现的？",
+  ],
+  CONFIG_REVIEW: [
+    "请展示完整的命令序列",
+    "这个配置常见的踩坑点有哪些？",
+    "如何在真实设备上验证它生效了？",
+  ],
+  LAB_TROUBLESHOOTING: [
+    "还有哪些可能的故障原因？",
+    "如何用 ping / traceroute 进一步定位？",
+    "请给我一份完整的排查清单",
+  ],
+  CALCULATION: [
+    "请展示完整的计算过程",
+    "再出一道类似的题让我练手",
+    "这种题型还有哪些常见陷阱？",
+  ],
+}
+const FOLLOW_UPS_DEFAULT = [
+  "请举个例子说明",
+  "请进一步深入这个点",
+  "如何在实验中验证？",
+]
+// 当前还在被引导（hint_level >= 2）时，追加两个偏"互动控制"的快捷追问
+const FOLLOW_UPS_HINT_HIGH = [
+  "我卡住了，请给一个关键提示",
+  "我已经想明白了，请直接确认答案",
+]
+
+function buildFollowUps(state?: ChatState): string[] {
+  const cat = state?.question_category || state?.category || ""
+  const base = FOLLOW_UPS_BY_CATEGORY[cat] || FOLLOW_UPS_DEFAULT
+  const level = Number(state?.hint_level ?? 0)
+  if (level >= 2) {
+    // 深度引导时优先暴露互动控制，再附带 1 条 category 模板
+    return [...FOLLOW_UPS_HINT_HIGH, base[0]].slice(0, 3)
+  }
+  return base.slice(0, 3)
 }
 
 const SUGGESTIONS: Array<{ title: string; prompt: string; icon: React.ReactNode }> = [
@@ -77,6 +133,8 @@ const SUGGESTIONS: Array<{ title: string; prompt: string; icon: React.ReactNode 
 
 export default function MessageList({
   messages,
+  sessionId,
+  loading,
   onFeedback,
   onRegenerate,
   onEditAndResend,
@@ -85,6 +143,11 @@ export default function MessageList({
   const ref = useRef<HTMLDivElement>(null)
   // 用户是否"贴近底部"。只有贴近底部时，新内容才自动滚；否则保留用户阅读位置。
   const [stickToBottom, setStickToBottom] = useState(true)
+  // 图片放大预览：所有消息共用一个 Lightbox
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
+  // 按 sessionId 缓存滚动位置：切回老会话时恢复阅读进度
+  const scrollPosRef = useRef<Record<string, number>>({})
+  const prevSessionIdRef = useRef<string | null>(null)
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     const el = ref.current
@@ -92,7 +155,8 @@ export default function MessageList({
     el.scrollTo({ top: el.scrollHeight, behavior })
   }, [])
 
-  // 监听滚动，更新 stickToBottom
+  // 监听滚动：更新 stickToBottom + 持续记录当前会话的 scrollTop
+  // deps 包含 sessionId 是因为 onScroll 闭包要引用最新的 sessionId
   useEffect(() => {
     const el = ref.current
     if (!el) return
@@ -100,21 +164,51 @@ export default function MessageList({
       if (!el) return
       const distance = el.scrollHeight - el.scrollTop - el.clientHeight
       setStickToBottom(distance <= BOTTOM_THRESHOLD_PX)
+      if (sessionId) scrollPosRef.current[sessionId] = el.scrollTop
     }
     el.addEventListener("scroll", onScroll, { passive: true })
     return () => el.removeEventListener("scroll", onScroll)
-  }, [])
+  }, [sessionId])
 
-  // 仅在贴近底部时自动滚动；否则保留用户位置（可点"回到底部"主动跟进）
+  // 仅在贴近底部时自动滚动；切换会话期间（loading）不自动滚，让恢复逻辑接管
   useEffect(() => {
+    if (loading) return
     if (stickToBottom) scrollToBottom("auto")
-  }, [messages, stickToBottom, scrollToBottom])
+  }, [messages, stickToBottom, scrollToBottom, loading])
+
+  // 切换会话瞬间记录前一个 session 的 scrollTop（onScroll 可能没来得及触发最新值）
+  useEffect(() => {
+    const prev = prevSessionIdRef.current
+    if (prev && prev !== sessionId && ref.current) {
+      scrollPosRef.current[prev] = ref.current.scrollTop
+    }
+    prevSessionIdRef.current = sessionId ?? null
+  }, [sessionId])
+
+  // loading: true → false 表示新会话消息已就绪 → 恢复缓存或贴底
+  // 注意：放在"自动滚到底" useEffect 之后声明，确保它后执行从而能覆盖滚动位置
+  useEffect(() => {
+    if (loading) return
+    if (!sessionId) return
+    const el = ref.current
+    if (!el) return
+    const cached = scrollPosRef.current[sessionId]
+    if (cached !== undefined) {
+      el.scrollTo({ top: cached })
+      const distance = el.scrollHeight - cached - el.clientHeight
+      setStickToBottom(distance <= BOTTOM_THRESHOLD_PX)
+    } else {
+      el.scrollTo({ top: el.scrollHeight })
+      setStickToBottom(true)
+    }
+  }, [loading, sessionId])
 
   return (
     <div className="flex-1 min-h-0 relative">
       <div ref={ref} className="absolute inset-0 overflow-y-auto px-6 py-6">
         <div className="max-w-3xl mx-auto space-y-4">
-          {messages.length === 0 && (
+          {loading && <SkeletonRows />}
+          {!loading && messages.length === 0 && (
             <div className="text-center py-12">
               <div className="flex justify-center mb-3">
                 <BrandLogo size={56} roundedClass="rounded-2xl" />
@@ -145,16 +239,22 @@ export default function MessageList({
               </div>
             </div>
           )}
-          {messages.map((m, i) => (
-            <MessageRow
-              key={i}
-              m={m}
-              index={i}
-              onFeedback={onFeedback}
-              onRegenerate={onRegenerate}
-              onEditAndResend={onEditAndResend}
-            />
-          ))}
+          {!loading &&
+            messages.map((m, i) => (
+              <MessageRow
+                key={i}
+                m={m}
+                index={i}
+                isLastAssistant={
+                  m.role === "assistant" && i === messages.length - 1 && !m.pending
+                }
+                onFeedback={onFeedback}
+                onRegenerate={onRegenerate}
+                onEditAndResend={onEditAndResend}
+                onPickSuggestion={onPickSuggestion}
+                onOpenImage={setLightboxSrc}
+              />
+            ))}
         </div>
       </div>
       {!stickToBottom && messages.length > 0 && (
@@ -172,6 +272,7 @@ export default function MessageList({
           回到底部
         </button>
       )}
+      <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
     </div>
   )
 }
@@ -237,23 +338,65 @@ function StageIndicator({ stage, tools }: { stage?: ChatStage; tools?: string[] 
 interface RowProps {
   m: ChatMessage
   index: number
+  /** 是否为对话中最后一条已完成的助手消息：仅它显示"建议追问"chip */
+  isLastAssistant?: boolean
   onFeedback?: (messageId: string, next: "like" | "dislike" | "cancel") => void
   onRegenerate?: (assistantMessageId: string) => void
   onEditAndResend?: (userMessageIndex: number, newText: string) => void
+  onPickSuggestion?: (text: string) => void
+  /** 点击图片缩略图：把放大查看委托给上层 Lightbox */
+  onOpenImage?: (src: string) => void
 }
 
-function MessageRow({ m, index, onFeedback, onRegenerate, onEditAndResend }: RowProps) {
+function MessageRow({
+  m,
+  index,
+  isLastAssistant,
+  onFeedback,
+  onRegenerate,
+  onEditAndResend,
+  onPickSuggestion,
+  onOpenImage,
+}: RowProps) {
   const [thinkOpen, setThinkOpen] = useState(false)
   // 流式思考块的展开状态：null=跟随默认（无 content 时展开，有 content 时折叠）；
   // boolean=用户主动覆盖。
   const [streamThinkOverride, setStreamThinkOverride] = useState<boolean | null>(null)
   const [editing, setEditing] = useState(false)
   const [editText, setEditText] = useState(m.content || "")
+  // 流式期间的"实时秒数"：由 setInterval 在 callback 内 setState 更新，
+  // render 不调 performance.now() 这类 impure 函数，避免 react-hooks/purity 报错
+  const [liveThinkSec, setLiveThinkSec] = useState<number | null>(null)
   const isUser = m.role === "user"
   const hasContent = !!m.content
   // 流式期间是否正在显示思考过程（pending 且已收到至少一段 thinking）
   const isStreamingThinking =
     !isUser && !!m.pending && !!m.streaming_thinking
+
+  // 仅在"思考已开始 + 尚未结束"时启动 ticker；callback 内 setState 不触发
+  // react-hooks/set-state-in-effect 规则
+  useEffect(() => {
+    const startedAt = m.thinking_started_at
+    const finalDur = m.thinking_duration_ms
+    if (startedAt === undefined || finalDur !== undefined) {
+      return
+    }
+    const id = window.setInterval(() => {
+      setLiveThinkSec((performance.now() - startedAt) / 1000)
+    }, 200)
+    return () => window.clearInterval(id)
+  }, [m.thinking_started_at, m.thinking_duration_ms])
+
+  const finalThinkSec =
+    m.thinking_duration_ms !== undefined ? m.thinking_duration_ms / 1000 : null
+  const isStillThinking =
+    m.thinking_started_at !== undefined && m.thinking_duration_ms === undefined
+  const thinkSecLabel =
+    finalThinkSec !== null
+      ? `${finalThinkSec.toFixed(1)}s`
+      : isStillThinking && liveThinkSec !== null
+        ? `${liveThinkSec.toFixed(1)}s`
+        : null
   // 默认：内容尚未出现 → 展开（让用户看到一步步思考）；内容出现 → 自动折叠
   const streamThinkAutoOpen = !hasContent
   const streamThinkOpen =
@@ -287,7 +430,19 @@ function MessageRow({ m, index, onFeedback, onRegenerate, onEditAndResend }: Row
               <ChevronRight className="w-3.5 h-3.5" />
             )}
             <Brain className="w-3.5 h-3.5 text-[hsl(var(--primary))]" />
-            <span>{streamThinkOpen ? "思考过程" : "已思考，点击查看"}</span>
+            <span>
+              {streamThinkOpen
+                ? finalThinkSec !== null
+                  ? `思考过程 · ${thinkSecLabel}`
+                  : isStillThinking
+                    ? thinkSecLabel
+                      ? `思考中 · ${thinkSecLabel}`
+                      : "思考中…"
+                    : "思考过程"
+                : finalThinkSec !== null
+                  ? `已思考 ${thinkSecLabel}，点击查看`
+                  : "已思考，点击查看"}
+            </span>
           </button>
           {streamThinkOpen && (
             <div className="mt-1 pl-5 flex items-start gap-1.5 text-xs italic text-[hsl(var(--muted-foreground))]">
@@ -321,7 +476,9 @@ function MessageRow({ m, index, onFeedback, onRegenerate, onEditAndResend }: Row
                 <ChevronRight className="w-3.5 h-3.5" />
               )}
               <Brain className="w-3.5 h-3.5" />
-              <span>思考过程</span>
+              <span>
+                {finalThinkSec !== null ? `思考过程 · ${thinkSecLabel}` : "思考过程"}
+              </span>
             </button>
           )}
         </div>
@@ -348,12 +505,20 @@ function MessageRow({ m, index, onFeedback, onRegenerate, onEditAndResend }: Row
           {isUser && m.images && m.images.length > 0 && (
             <div className="flex flex-wrap gap-2 mb-2">
               {m.images.map((src, idx) => (
-                <img
+                <button
                   key={idx}
-                  src={src}
-                  alt={`uploaded-${idx}`}
-                  className="max-w-[180px] max-h-[180px] rounded-lg border border-white/30"
-                />
+                  type="button"
+                  onClick={() => onOpenImage?.(src)}
+                  className="block p-0 border-0 bg-transparent cursor-zoom-in"
+                  aria-label="放大查看图片"
+                  title="点击放大"
+                >
+                  <img
+                    src={src}
+                    alt={`uploaded-${idx}`}
+                    className="max-w-[180px] max-h-[180px] rounded-lg border border-white/30 transition-transform hover:scale-[1.02]"
+                  />
+                </button>
               ))}
             </div>
           )}
@@ -435,9 +600,72 @@ function MessageRow({ m, index, onFeedback, onRegenerate, onEditAndResend }: Row
       {!isUser && !m.pending && (
         <>
           <MessageActions m={m} onFeedback={onFeedback} onRegenerate={onRegenerate} />
+          {isLastAssistant && hasContent && onPickSuggestion && (
+            <FollowUpChips state={m.state} onPick={onPickSuggestion} />
+          )}
           <TraceList traces={m.tool_traces} />
         </>
       )}
+    </div>
+  )
+}
+
+function FollowUpChips({
+  state,
+  onPick,
+}: {
+  state?: ChatState
+  onPick: (text: string) => void
+}) {
+  const items = buildFollowUps(state)
+  if (items.length === 0) return null
+  return (
+    <div className="mt-1.5 max-w-[82%] px-1">
+      <div className="flex items-center gap-1 text-[11px] text-[hsl(var(--muted-foreground))] mb-1">
+        <Lightbulb className="w-3 h-3 text-amber-500" />
+        <span>可以这样接着问</span>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {items.map((t) => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => onPick(t)}
+            className="text-left text-xs px-2.5 py-1 rounded-full border border-[hsl(var(--border))] bg-white text-[hsl(var(--ink-700,#4D3D3A))] hover:border-[hsl(var(--primary)/0.4)] hover:bg-[hsl(var(--primary)/0.04)] hover:text-[hsl(var(--primary))] transition-colors"
+            title={t}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** 切换会话期间的占位骨架，避免空白闪烁 */
+function SkeletonRows() {
+  const rows: Array<{ side: "left" | "right"; w: string; h: string }> = [
+    { side: "right", w: "w-48", h: "h-12" },
+    { side: "left", w: "w-72", h: "h-20" },
+    { side: "right", w: "w-40", h: "h-10" },
+    { side: "left", w: "w-80", h: "h-24" },
+  ]
+  return (
+    <div className="space-y-4" aria-busy="true" aria-label="正在加载会话">
+      {rows.map((s, i) => (
+        <div
+          key={i}
+          className={cn("flex", s.side === "right" ? "justify-end" : "justify-start")}
+        >
+          <div
+            className={cn(
+              "rounded-2xl bg-[hsl(var(--accent))] animate-pulse",
+              s.w,
+              s.h,
+            )}
+          />
+        </div>
+      ))}
     </div>
   )
 }

@@ -130,25 +130,43 @@ export function HintLevelChip({
 }) {
   if (hintLevel === undefined || hintLevel === null) return null
   const level = Math.max(0, Math.min(3, Math.floor(Number(hintLevel))))
-  const labels = ["L0 直接回答", "L1 轻提示", "L2 引导", "L3 深度引导"]
-  const tone = [
-    "bg-[hsl(var(--accent))] text-[hsl(var(--ink-700,#4D3D3A))]",
-    "bg-amber-50 text-amber-900 border-amber-200",
-    "bg-orange-50 text-orange-900 border-orange-200",
-    "bg-rose-50 text-rose-900 border-rose-200",
+  const labels = ["直接作答", "轻提示", "引导思考", "深度引导"]
+  const descriptions = [
+    "用户已掌握或问题较简单，直接给出答案",
+    "给出关键提示，鼓励自主完成",
+    "分步引导，逐层揭示思路",
+    "深度苏格拉底式追问，尽量不直接给答案",
   ]
+  const tone = [
+    "bg-[hsl(var(--accent))] text-[hsl(var(--ink-700,#4D3D3A))] border-[hsl(var(--border))]",
+    "bg-amber-50 text-amber-900 border-amber-200",
+    "bg-orange-50 text-orange-900 border-orange-300",
+    "bg-rose-50 text-rose-900 border-rose-300",
+  ]
+  const barHeights = ["h-1.5", "h-2", "h-2.5", "h-3"]
   return (
     <div
       className={cn(
-        "inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border border-[hsl(var(--border))]",
+        "inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded-full border",
         tone[level],
       )}
       title={
-        category
-          ? `提示层级 ${level} · 问题类别：${category}`
-          : `提示层级 ${level}`
+        `L${level} · ${labels[level]}：${descriptions[level]}` +
+        (category ? `\n问题类别：${category}` : "")
       }
     >
+      <span aria-hidden="true" className="flex items-end gap-[2px] mr-0.5">
+        {[0, 1, 2, 3].map((i) => (
+          <span
+            key={i}
+            className={cn(
+              "block w-[3px] rounded-sm bg-current",
+              i <= level ? "opacity-90" : "opacity-25",
+              barHeights[i],
+            )}
+          />
+        ))}
+      </span>
       <span className="font-semibold">{labels[level]}</span>
       {category && <span className="opacity-70">· {category}</span>}
     </div>

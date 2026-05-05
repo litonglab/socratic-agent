@@ -1,6 +1,7 @@
-import { useEffect, useState, useCallback, useRef } from "react"
+import { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import { useNavigate } from "react-router-dom"
 import { PanelLeftOpen } from "lucide-react"
+import { useHotkeys, type HotkeyBinding } from "@/hooks/useHotkeys"
 import {
   chatStream,
   listSessions,
@@ -41,10 +42,13 @@ export default function ChatPage({ auth }: Props) {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streaming, setStreaming] = useState(false)
+  const [messagesLoading, setMessagesLoading] = useState(false)
   const [websearch, setWebsearch] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(readSidebarOpen)
   // 流式请求的 AbortController：切换会话 / 卸载 / 用户主动停止时取消
   const abortRef = useRef<AbortController | null>(null)
+  // 侧栏搜索框 ref：用于 Cmd/Ctrl+K 聚焦
+  const sidebarSearchRef = useRef<HTMLInputElement | null>(null)
 
   const cancelStream = useCallback(() => {
     if (abortRef.current) {
@@ -110,6 +114,7 @@ export default function ChatPage({ auth }: Props) {
     cancelStream()
     setStreaming(false)
     setActiveId(id)
+    setMessagesLoading(true)
     try {
       const data = await fetchSessionMessages(id)
       setMessages(
@@ -125,15 +130,51 @@ export default function ChatPage({ auth }: Props) {
     } catch (e) {
       console.warn("[ChatPage] fetchSessionMessages failed:", e)
       setMessages([])
+    } finally {
+      setMessagesLoading(false)
     }
   }
 
-  function newSession() {
+  const newSession = useCallback(() => {
     cancelStream()
     setStreaming(false)
     setActiveId(null)
     setMessages([])
-  }
+  }, [cancelStream])
+
+  // 全局快捷键：
+  //  - Cmd/Ctrl+B    折叠/展开侧栏
+  //  - Cmd/Ctrl+⇧+O  新建会话（避开浏览器原生 Cmd+N）
+  //  - Cmd/Ctrl+K    展开侧栏并聚焦搜索框（在输入框内也允许触发）
+  const hotkeys = useMemo<HotkeyBinding[]>(
+    () => [
+      {
+        key: "b",
+        meta: true,
+        handler: () => setSidebarOpen((v) => !v),
+      },
+      {
+        key: "o",
+        meta: true,
+        shift: true,
+        handler: () => newSession(),
+      },
+      {
+        key: "k",
+        meta: true,
+        allowInInput: true,
+        handler: () => {
+          setSidebarOpen(true)
+          requestAnimationFrame(() => {
+            sidebarSearchRef.current?.focus()
+            sidebarSearchRef.current?.select()
+          })
+        },
+      },
+    ],
+    [newSession],
+  )
+  useHotkeys(hotkeys)
 
   async function deleteSess(id: string) {
     try {
@@ -303,6 +344,7 @@ export default function ChatPage({ auth }: Props) {
           })
         } else if (ev.type === "thinking_delta" && ev.content) {
           // 流式思考增量：累积到 streaming_thinking，气泡上方斜体浅色显示
+          // 第一次到达即记录 thinking_started_at（performance.now 时间戳）
           setMessages((prev) => {
             const next = [...prev]
             const last = next[next.length - 1]
@@ -310,6 +352,8 @@ export default function ChatPage({ auth }: Props) {
               next[next.length - 1] = {
                 ...last,
                 streaming_thinking: (last.streaming_thinking || "") + ev.content,
+                thinking_started_at:
+                  last.thinking_started_at ?? performance.now(),
               }
             }
             return next
@@ -320,11 +364,19 @@ export default function ChatPage({ auth }: Props) {
             const next = [...prev]
             const last = next[next.length - 1]
             if (last && last.role === "assistant") {
+              // 思考阶段结束、首次进入正文 → 记录 thinking_duration_ms
+              const isFirstToken = !last.content
+              const finalDur =
+                last.thinking_duration_ms ??
+                (isFirstToken && last.thinking_started_at !== undefined
+                  ? performance.now() - last.thinking_started_at
+                  : undefined)
               next[next.length - 1] = {
                 ...last,
                 content: bufVisible,
                 pending: true,
                 stage: "generating",
+                thinking_duration_ms: finalDur,
               }
             }
             return next
@@ -336,6 +388,12 @@ export default function ChatPage({ auth }: Props) {
             const next = [...prev]
             const last = next[next.length - 1]
             if (last && last.role === "assistant") {
+              // 兜底：done 之前可能完全没有 token（仅 thinking → done）
+              const finalDur =
+                last.thinking_duration_ms ??
+                (last.thinking_started_at !== undefined
+                  ? performance.now() - last.thinking_started_at
+                  : undefined)
               next[next.length - 1] = {
                 role: "assistant",
                 content: finalReply,
@@ -344,6 +402,8 @@ export default function ChatPage({ auth }: Props) {
                 feedback: null,
                 tool_traces: ev.tool_traces,
                 state: ev.state,
+                thinking_started_at: last.thinking_started_at,
+                thinking_duration_ms: finalDur,
               }
             }
             return next
@@ -424,6 +484,7 @@ export default function ChatPage({ auth }: Props) {
             user={auth.user}
             sessions={sessions}
             activeId={activeId}
+            searchInputRef={sidebarSearchRef}
             onNew={() => {
               newSession()
               if (window.matchMedia("(max-width: 767px)").matches) {
@@ -472,6 +533,8 @@ export default function ChatPage({ auth }: Props) {
         )}
         <MessageList
           messages={messages}
+          sessionId={activeId}
+          loading={messagesLoading}
           onFeedback={onFeedback}
           onRegenerate={handleRegenerate}
           onEditAndResend={handleEditAndResend}

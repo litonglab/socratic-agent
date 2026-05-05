@@ -1,7 +1,8 @@
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useMemo } from "react"
 import { Send, Paperclip, Loader2, Globe, X, Square } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { useHotkeys, type HotkeyBinding } from "@/hooks/useHotkeys"
 
 export interface AttachedImage {
   id: string
@@ -44,6 +45,18 @@ export default function ChatInput({
     ta.style.height = "auto"
     ta.style.height = Math.min(ta.scrollHeight, 200) + "px"
   }, [text])
+
+  // "/" 聚焦输入框（默认在 input/textarea/contenteditable 内不触发，避免和打字冲突）
+  const hotkeys = useMemo<HotkeyBinding[]>(
+    () => [
+      {
+        key: "/",
+        handler: () => taRef.current?.focus(),
+      },
+    ],
+    [],
+  )
+  useHotkeys(hotkeys)
 
   function submit() {
     const v = text.trim()

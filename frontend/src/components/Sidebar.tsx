@@ -30,6 +30,8 @@ interface Props {
   onRename: (id: string, title: string) => void | Promise<void>
   onLogout: () => void
   onCollapse?: () => void
+  /** 由父组件持有的 ref，用于实现 Cmd/Ctrl+K 聚焦搜索 */
+  searchInputRef?: React.RefObject<HTMLInputElement | null>
 }
 
 interface SessionGroup {
@@ -104,6 +106,7 @@ export default function Sidebar(props: Props) {
     onRename,
     onLogout,
     onCollapse,
+    searchInputRef,
   } = props
 
   const [query, setQuery] = useState("")
@@ -148,10 +151,11 @@ export default function Sidebar(props: Props) {
         <div className="relative">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[hsl(var(--muted-foreground))]" />
           <input
+            ref={searchInputRef}
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索会话标题…"
+            placeholder="搜索会话标题…   ⌘K"
             className="w-full h-8 pl-8 pr-7 rounded-md bg-white border border-[hsl(var(--border))] text-sm outline-none focus:border-[hsl(var(--primary))] focus:ring-1 focus:ring-[hsl(var(--primary)/0.25)]"
             aria-label="搜索会话"
           />
