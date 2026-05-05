@@ -1,15 +1,36 @@
 import { useState, useRef, useEffect, useMemo } from "react"
-import { Send, Paperclip, Loader2, Globe, X, Square } from "lucide-react"
+import {
+  Send,
+  Paperclip,
+  Loader2,
+  Globe,
+  X,
+  Square,
+  FileText,
+  FileArchive,
+  FileSpreadsheet,
+  File as FileIcon,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useHotkeys, type HotkeyBinding } from "@/hooks/useHotkeys"
 
-export interface AttachedImage {
+/** 统一的附件抽象：图片走 OCR，其它走文件抽取。 */
+export interface Attachment {
   id: string
-  base64: string // pure base64 (no data:)
+  /** "image" 走 dataUrl 缩略图；"file" 显示为 chip。 */
+  kind: "image" | "file"
+  name: string
+  size: number
   mime: string
-  dataUrl: string // for preview
+  /** 纯 base64（不带 data: 前缀），上传给后端用 */
+  base64: string
+  /** 仅图片：data URL，用于本地预览 */
+  dataUrl?: string
 }
+
+/** 兼容老调用方：图片附件类型别名。 */
+export type AttachedImage = Attachment
 
 interface Props {
   disabled?: boolean
@@ -17,12 +38,89 @@ interface Props {
   streaming?: boolean
   websearch: boolean
   onWebsearchChange: (v: boolean) => void
-  onSend: (text: string, images: AttachedImage[]) => void
+  onSend: (text: string, attachments: Attachment[]) => void
   onStop?: () => void
 }
 
-const MAX_IMAGES = 4
-const MAX_BYTES = 8 * 1024 * 1024 // 8MB
+const MAX_ATTACHMENTS = 4
+const MAX_BYTES = 10 * 1024 * 1024 // 10MB
+
+// 后端可解析的非图片扩展名（与 agentic_rag/file_extract.py PLAIN_TEXT_EXTS + 文档类对齐）
+const FILE_EXT_WHITELIST = new Set<string>([
+  ".pdf",
+  ".docx",
+  ".doc",
+  ".xlsx",
+  ".pptx",
+  ".zip",
+  ".txt",
+  ".md",
+  ".markdown",
+  ".rst",
+  ".log",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".ini",
+  ".cfg",
+  ".conf",
+  ".env",
+  ".csv",
+  ".tsv",
+  ".py",
+  ".js",
+  ".jsx",
+  ".ts",
+  ".tsx",
+  ".java",
+  ".c",
+  ".cc",
+  ".cpp",
+  ".h",
+  ".hpp",
+  ".go",
+  ".rs",
+  ".rb",
+  ".php",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".html",
+  ".htm",
+  ".xml",
+  ".sql",
+])
+
+const ACCEPT_ATTR = "image/*," + Array.from(FILE_EXT_WHITELIST).join(",")
+
+function getExt(name: string): string {
+  const idx = name.lastIndexOf(".")
+  return idx >= 0 ? name.slice(idx).toLowerCase() : ""
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+}
+
+/** 按扩展名挑一个合适的 lucide 图标。 */
+function pickFileIcon(name: string) {
+  const ext = getExt(name)
+  if (ext === ".zip") return FileArchive
+  if (ext === ".xlsx" || ext === ".csv" || ext === ".tsv") return FileSpreadsheet
+  if (
+    ext === ".pdf" ||
+    ext === ".docx" ||
+    ext === ".doc" ||
+    ext === ".pptx" ||
+    ext === ".txt" ||
+    ext === ".md"
+  )
+    return FileText
+  return FileIcon
+}
 
 export default function ChatInput({
   disabled,
@@ -33,7 +131,7 @@ export default function ChatInput({
   onStop,
 }: Props) {
   const [text, setText] = useState("")
-  const [images, setImages] = useState<AttachedImage[]>([])
+  const [attachments, setAttachments] = useState<Attachment[]>([])
   const [error, setError] = useState<string | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -60,10 +158,10 @@ export default function ChatInput({
 
   function submit() {
     const v = text.trim()
-    if ((!v && images.length === 0) || disabled) return
-    onSend(v, images)
+    if ((!v && attachments.length === 0) || disabled) return
+    onSend(v, attachments)
     setText("")
-    setImages([])
+    setAttachments([])
     setError(null)
   }
 
@@ -75,32 +173,46 @@ export default function ChatInput({
   }
 
   async function addFiles(files: FileList | File[]) {
-    const arr = Array.from(files).filter((f) => f.type.startsWith("image/"))
+    const arr = Array.from(files)
     if (arr.length === 0) return
-    const next: AttachedImage[] = []
+    const next: Attachment[] = []
     for (const f of arr) {
-      if (images.length + next.length >= MAX_IMAGES) {
-        setError(`最多上传 ${MAX_IMAGES} 张图片`)
+      if (attachments.length + next.length >= MAX_ATTACHMENTS) {
+        setError(`最多上传 ${MAX_ATTACHMENTS} 个附件`)
         break
       }
       if (f.size > MAX_BYTES) {
-        setError(`图片 ${f.name} 超过 ${(MAX_BYTES / 1024 / 1024).toFixed(0)}MB`)
+        setError(`文件 ${f.name} 超过 ${(MAX_BYTES / 1024 / 1024).toFixed(0)}MB`)
         continue
       }
-      const dataUrl = await readAsDataURL(f)
-      const base64 = dataUrl.split(",", 2)[1] || ""
-      next.push({
-        id: Math.random().toString(36).slice(2),
-        base64,
-        mime: f.type || "image/png",
-        dataUrl,
-      })
+      const isImage = (f.type || "").startsWith("image/")
+      const ext = getExt(f.name)
+      if (!isImage && !FILE_EXT_WHITELIST.has(ext)) {
+        setError(`暂不支持的文件类型：${f.name}`)
+        continue
+      }
+      try {
+        const dataUrl = await readAsDataURL(f)
+        const base64 = dataUrl.split(",", 2)[1] || ""
+        next.push({
+          id: Math.random().toString(36).slice(2),
+          kind: isImage ? "image" : "file",
+          name: f.name || (isImage ? "image.png" : "file"),
+          size: f.size,
+          mime: f.type || (isImage ? "image/png" : "application/octet-stream"),
+          base64,
+          dataUrl: isImage ? dataUrl : undefined,
+        })
+      } catch (err) {
+        setError(`读取失败：${f.name}（${(err as Error).message || "unknown"}）`)
+      }
     }
-    if (next.length) setImages((prev) => [...prev, ...next])
+    if (next.length) setAttachments((prev) => [...prev, ...next])
   }
 
   function onPaste(e: React.ClipboardEvent) {
     if (!e.clipboardData?.files?.length) return
+    // 仅拦截图片粘贴；其它文件粘贴体验各浏览器差异较大，避免误吞
     const imgs = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"))
     if (imgs.length) {
       e.preventDefault()
@@ -108,9 +220,12 @@ export default function ChatInput({
     }
   }
 
-  function removeImage(id: string) {
-    setImages((prev) => prev.filter((x) => x.id !== id))
+  function removeAttachment(id: string) {
+    setAttachments((prev) => prev.filter((x) => x.id !== id))
   }
+
+  const images = attachments.filter((a) => a.kind === "image")
+  const files = attachments.filter((a) => a.kind === "file")
 
   return (
     <div className="px-6 pb-6">
@@ -124,8 +239,8 @@ export default function ChatInput({
 
         {/* 输入框容器 */}
         <div className="rounded-2xl border border-[hsl(var(--border))] bg-white shadow-[0_4px_14px_rgba(38,22,19,0.06)] focus-within:border-[hsl(var(--primary))] focus-within:ring-2 focus-within:ring-[hsl(var(--primary)/0.18)]">
-          {/* 缩略图 */}
-          {images.length > 0 && (
+          {/* 附件预览：图片缩略图 + 文件 chip */}
+          {(images.length > 0 || files.length > 0) && (
             <div className="flex flex-wrap gap-2 px-3 pt-2.5">
               {images.map((img) => (
                 <div key={img.id} className="relative group">
@@ -136,7 +251,7 @@ export default function ChatInput({
                   />
                   <button
                     type="button"
-                    onClick={() => removeImage(img.id)}
+                    onClick={() => removeAttachment(img.id)}
                     className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-[hsl(var(--destructive))] text-white grid place-items-center opacity-90 hover:opacity-100"
                     aria-label="删除图片"
                   >
@@ -144,6 +259,30 @@ export default function ChatInput({
                   </button>
                 </div>
               ))}
+              {files.map((f) => {
+                const Icon = pickFileIcon(f.name)
+                return (
+                  <div
+                    key={f.id}
+                    className="relative group inline-flex items-center gap-1.5 max-w-[220px] h-8 px-2 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--accent))]/40 text-xs text-[hsl(var(--ink-700,#4D3D3A))]"
+                    title={`${f.name} · ${formatSize(f.size)}`}
+                  >
+                    <Icon className="w-3.5 h-3.5 shrink-0 text-[hsl(var(--primary))]" />
+                    <span className="truncate">{f.name}</span>
+                    <span className="shrink-0 text-[hsl(var(--muted-foreground))]">
+                      {formatSize(f.size)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(f.id)}
+                      className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-[hsl(var(--destructive))] text-white grid place-items-center opacity-90 hover:opacity-100"
+                      aria-label="删除附件"
+                    >
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  </div>
+                )
+              })}
             </div>
           )}
 
@@ -154,7 +293,7 @@ export default function ChatInput({
             onChange={(e) => setText(e.target.value)}
             onKeyDown={handleKey}
             onPaste={onPaste}
-            placeholder="输入你的问题，例如：我对子网划分感到困惑（可粘贴图片）"
+            placeholder="输入你的问题，例如：我对子网划分感到困惑（可粘贴图片，也可上传 PDF / Word / ZIP）"
             rows={1}
             className="block w-full resize-none bg-transparent outline-none text-sm leading-relaxed max-h-[200px] px-3.5 pt-3 pb-1"
           />
@@ -165,14 +304,14 @@ export default function ChatInput({
               type="button"
               onClick={() => fileRef.current?.click()}
               className="shrink-0 w-8 h-8 grid place-items-center rounded-lg text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--primary))]"
-              title="上传图片（也可粘贴）"
+              title="上传附件（图片可粘贴；支持 PDF / Word / Excel / PPT / ZIP / 文本）"
             >
               <Paperclip className="w-4 h-4" />
             </button>
             <input
               ref={fileRef}
               type="file"
-              accept="image/*"
+              accept={ACCEPT_ATTR}
               multiple
               hidden
               onChange={(e) => {
@@ -226,7 +365,7 @@ export default function ChatInput({
               <Button
                 size="icon"
                 onClick={submit}
-                disabled={disabled || (!text.trim() && images.length === 0)}
+                disabled={disabled || (!text.trim() && attachments.length === 0)}
                 className="shrink-0 w-9 h-9 rounded-xl"
                 title="发送 (Enter)"
                 aria-label="发送"

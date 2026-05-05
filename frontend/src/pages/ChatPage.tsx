@@ -17,7 +17,7 @@ import { toast } from "@/lib/toast"
 import type { AuthState } from "@/hooks/useAuth"
 import Sidebar from "@/components/Sidebar"
 import MessageList, { type ChatMessage, type FeedbackValue } from "@/components/MessageList"
-import ChatInput, { type AttachedImage } from "@/components/ChatInput"
+import ChatInput, { type Attachment } from "@/components/ChatInput"
 import { cn } from "@/lib/utils"
 
 const SIDEBAR_KEY = "netruc_sidebar_open"
@@ -124,7 +124,9 @@ export default function ChatPage({ auth }: Props) {
           thinking: m.thinking || undefined,
           message_id: m.message_id ?? null,
           feedback: (m.feedback as FeedbackValue) ?? null,
-          images: m.image_b64?.map((b) => `data:image/png;base64,${b}`),
+          // 后端持久化的是压缩后的 JPEG 缩略图；浏览器对 dataUrl mime 不严格但仍写正确值
+          images: m.image_b64?.map((b) => `data:image/jpeg;base64,${b}`),
+          files: m.files,
         })),
       )
     } catch (e) {
@@ -257,7 +259,7 @@ export default function ChatPage({ auth }: Props) {
 
   /**
    * 编辑用户消息后重发：截断到该用户消息之前，使用新文本重发。
-   * 旧的图片附件不带过去（用户编辑文字常意味着重启上下文）。
+   * 旧的附件不带过去（用户编辑文字常意味着重启上下文）。
    */
   async function handleEditAndResend(userMessageIndex: number, newText: string) {
     if (streaming) return
@@ -286,14 +288,21 @@ export default function ChatPage({ auth }: Props) {
 
   async function send(
     text: string,
-    images: AttachedImage[],
+    attachments: Attachment[],
     opts: { truncateTo?: number } = {},
   ) {
     if (streaming) return
+    const imageAttachments = attachments.filter((a) => a.kind === "image")
+    const fileAttachments = attachments.filter((a) => a.kind === "file")
     const userMsg: ChatMessage = {
       role: "user",
       content: text,
-      images: images.map((i) => i.dataUrl),
+      images: imageAttachments
+        .map((i) => i.dataUrl)
+        .filter((u): u is string => !!u),
+      files: fileAttachments.length
+        ? fileAttachments.map((f) => ({ name: f.name, size: f.size }))
+        : undefined,
     }
     const assistantPending: ChatMessage = { role: "assistant", content: "", pending: true }
     setMessages((prev) => [...prev, userMsg, assistantPending])
@@ -313,8 +322,15 @@ export default function ChatPage({ auth }: Props) {
           session_id: activeId,
           enable_websearch: websearch,
           truncate_history_to: opts.truncateTo,
-          images: images.length
-            ? images.map((i) => ({ base64: i.base64, mime: i.mime }))
+          images: imageAttachments.length
+            ? imageAttachments.map((i) => ({ base64: i.base64, mime: i.mime }))
+            : undefined,
+          files: fileAttachments.length
+            ? fileAttachments.map((f) => ({
+                name: f.name,
+                base64: f.base64,
+                mime: f.mime,
+              }))
             : undefined,
         },
         ctrl.signal,

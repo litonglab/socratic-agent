@@ -136,6 +136,17 @@ class ChatImageInput(BaseModel):
     mime: Optional[str] = None
 
 
+class ChatFileInput(BaseModel):
+    """非图片附件（pdf / docx / xlsx / pptx / zip / 纯文本/代码 等）。
+
+    与 ChatImageInput 共用 ``base64`` 形式承载内容，但需要文件名以决定
+    后端用哪种解析器；mime 仅作展示用，不参与分发。
+    """
+    name: str
+    base64: str
+    mime: Optional[str] = None
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
@@ -148,6 +159,7 @@ class ChatRequest(BaseModel):
     enable_websearch: bool = True
     allow_process_explanations: bool = True
     images: Optional[List[ChatImageInput]] = None
+    files: Optional[List[ChatFileInput]] = None
 
 
 class ToolTrace(BaseModel):
@@ -296,7 +308,8 @@ def _copy_message_for_storage(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(item, dict):
         return None
     copied = copy.deepcopy(item)
-    copied.pop("image_b64", None)
+    # 历史会话回看：user 消息上的图片缩略图（image_b64）与文件 chip 元信息（files）
+    # 都允许写入持久层。原图与文件原文不在这里产生，外层只会塞已经压缩好的缩略图 + 文件 metadata。
     if copied.get("role") == "assistant":
         visible, _ = split_visible_and_thinking(copied.get("content", "") or "")
         copied["content"] = visible
@@ -314,6 +327,28 @@ def _normalize_message_records(items: Optional[List[Dict[str, Any]]]) -> List[Di
     return normalized
 
 
+def _make_image_thumbnail_b64(raw_b64: str) -> Optional[str]:
+    """把图片 base64 压成 ≤800x800 的 JPEG 缩略图 base64（不带 data: 前缀）。
+
+    用途：让历史会话回看时仍能看到当时上传的图片，但不让 DB 被原图撑大。
+    失败时返回 None，调用方应跳过这张缩略图。
+    """
+    try:
+        import io as _io
+        from PIL import Image
+        raw = base64.b64decode(raw_b64)
+        img = Image.open(_io.BytesIO(raw))
+        img.thumbnail((800, 800))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=75, optimize=True)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as exc:  # pragma: no cover
+        print(f"[server] thumbnail failed: {exc}")
+        return None
+
+
 def _build_session_history_records(
     session_snapshot: Dict[str, Any],
     client_history: Optional[List[Dict[str, Any]]],
@@ -322,6 +357,9 @@ def _build_session_history_records(
     thinking: str,
     message_id: str,
     tool_traces: List[Dict[str, Any]],
+    *,
+    user_image_b64: Optional[List[str]] = None,
+    user_files: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str, bool]:
     stored_history = _normalize_message_records(session_snapshot.get("history", []))
     if stored_history:
@@ -330,7 +368,13 @@ def _build_session_history_records(
         base_messages = _normalize_message_records(_normalize_client_history(client_history, current_message))
 
     full_messages = list(base_messages)
-    full_messages.append({"role": "user", "content": current_message})
+    user_record: Dict[str, Any] = {"role": "user", "content": current_message}
+    # 仅在确实有内容时才挂字段，避免空数组占用存储
+    if user_image_b64:
+        user_record["image_b64"] = list(user_image_b64)
+    if user_files:
+        user_record["files"] = [dict(f) for f in user_files if isinstance(f, dict)]
+    full_messages.append(user_record)
     full_messages.append({
         "role": "assistant",
         "content": assistant_message,
@@ -825,7 +869,15 @@ def create_app() -> FastAPI:
 
     @app.post("/api/chat/stream")
     def chat_stream(req: ChatRequest, authorization: Optional[str] = Header(None)):
-        # 若客户端附带图片：先做 OCR / 视觉描述，再把内容拼到 message 前
+        # 关键设计：
+        #   - original_user_message：用户在输入框真正打的字，仅用于 dedupe / 持久化 / 摘要。
+        #   - enriched_message：在原文基础上把附件抽取结果拼到前面，仅作为 LLM 的输入。
+        # 这样 stored_history 里 user 消息的 content 永远是用户真实输入，
+        # 重新打开会话时不会看到长长的附件抽取文本（与"附件本身不持久化"的设计一致）。
+        original_user_message = req.message or ""
+        enriched_message = original_user_message
+
+        # 若客户端附带图片：先做 OCR / 视觉描述，再把内容拼到 enriched_message 前
         if req.images:
             try:
                 from agentic_rag.vision import describe_image
@@ -841,14 +893,48 @@ def create_app() -> FastAPI:
                         desc_lines.append(f"[图片 {i+1}]: (识别失败: {ex})")
                 if desc_lines:
                     desc_block = "\n".join(desc_lines)
-                    user_text = (req.message or "").strip()
+                    user_text = enriched_message.strip()
                     if user_text:
-                        req.message = f"以下是用户上传的图片内容：\n{desc_block}\n\n用户的问题：{user_text}"
+                        enriched_message = f"以下是用户上传的图片内容：\n{desc_block}\n\n用户的问题：{user_text}"
                     else:
-                        req.message = f"以下是用户上传的图片内容：\n{desc_block}\n\n请根据图片内容回答。"
+                        enriched_message = f"以下是用户上传的图片内容：\n{desc_block}\n\n请根据图片内容回答。"
             except Exception as ex:  # pragma: no cover
                 # vision 模块不可用时仅打印，不阻塞 chat
                 print(f"[chat_stream] image preprocessing failed: {ex}")
+
+        # 若客户端附带非图片附件（pdf/docx/xlsx/pptx/zip/纯文本等）：抽取文本后拼到 enriched_message 前。
+        # 总字符上限 24000，避免 prompt 爆 token；超出则按附件顺序截断尾部。
+        if req.files:
+            try:
+                from agentic_rag.file_extract import extract_text
+                TOTAL_CHAR_LIMIT = 24000
+                file_blocks: List[str] = []
+                remaining = TOTAL_CHAR_LIMIT
+                for i, f in enumerate(req.files):
+                    if not f or not f.base64:
+                        continue
+                    name = (f.name or f"file_{i}").strip() or f"file_{i}"
+                    try:
+                        f_bytes = base64.b64decode(f.base64)
+                        text, _supported = extract_text(name, f_bytes)
+                    except Exception as ex:
+                        text = f"[抽取失败: {ex}]"
+                    if remaining <= 0:
+                        file_blocks.append(f"[附件 {i+1} {name}]: (已超出总长度上限，未读取)")
+                        continue
+                    if len(text) > remaining:
+                        text = text[:remaining] + "\n…[累计长度超限，已截断]"
+                    remaining -= len(text)
+                    file_blocks.append(f"[附件 {i+1} {name}]:\n{text}")
+                if file_blocks:
+                    files_block = "\n\n".join(file_blocks)
+                    user_text = enriched_message.strip()
+                    if user_text:
+                        enriched_message = f"以下是用户上传的附件内容：\n{files_block}\n\n用户的问题：{user_text}"
+                    else:
+                        enriched_message = f"以下是用户上传的附件内容：\n{files_block}\n\n请根据附件内容回答。"
+            except Exception as ex:  # pragma: no cover
+                print(f"[chat_stream] file preprocessing failed: {ex}")
 
         user = _resolve_optional_user(authorization)
         _acquire_chat_slot()
@@ -856,7 +942,13 @@ def create_app() -> FastAPI:
         def event_stream():
             try:
                 if user is None:
-                    yield from _legacy_chat_stream_events(req)
+                    # legacy 路径行为保持不变：把 enriched_message 临时塞回 req.message 后再走老逻辑
+                    saved = req.message
+                    req.message = enriched_message
+                    try:
+                        yield from _legacy_chat_stream_events(req)
+                    finally:
+                        req.message = saved
                     return
                 user_id = user["id"]
                 sid = req.session_id or f"s_{uuid4().hex[:10]}"
@@ -871,10 +963,11 @@ def create_app() -> FastAPI:
                             keep = stored[: req.truncate_history_to]
                             session_snapshot["history"] = keep
                             session_snapshot["last_turns"] = keep[-PERSISTED_LAST_TURNS:]
+                    # dedupe 用原始用户输入；附件文本不参与判断
                     history_dicts, _authoritative_history, summary = _choose_history_context(
                         session_snapshot,
                         req.history,
-                        req.message,
+                        original_user_message,
                     )
                     history_msgs = dicts_to_messages(history_dicts)
                     state_dict = session_snapshot.get("state", None)
@@ -887,7 +980,7 @@ def create_app() -> FastAPI:
                     final_thinking_full = ""
 
                     for event in query_stream(
-                        req.message,
+                        enriched_message,
                         history=history_msgs,
                         max_turns=req.max_turns,
                         debug=req.debug,
@@ -919,14 +1012,40 @@ def create_app() -> FastAPI:
                             thinking = (final_thinking_full + "\n\n" + thinking).strip()
                         elif not thinking:
                             thinking = final_thinking_full
+                    # 持久化用原始用户输入；附件抽取出来的长文本不入库
+                    # 但 user 消息上的"附件元信息"要写进 stored_history，
+                    # 让重新打开会话时仍能看到当时的图片缩略图与文件名 chip。
+                    user_image_thumbs: List[str] = []
+                    if req.images:
+                        for img in req.images:
+                            if not img or not img.base64:
+                                continue
+                            thumb = _make_image_thumbnail_b64(img.base64)
+                            if thumb:
+                                user_image_thumbs.append(thumb)
+                    user_files_meta: List[Dict[str, Any]] = []
+                    if req.files:
+                        for f in req.files:
+                            if not f or not f.name:
+                                continue
+                            meta: Dict[str, Any] = {"name": f.name}
+                            if f.base64:
+                                # 仅用 base64 长度估算原始字节数（base64 长度 * 3/4），不存原文
+                                try:
+                                    meta["size"] = max(0, (len(f.base64) * 3) // 4)
+                                except Exception:
+                                    pass
+                            user_files_meta.append(meta)
                     full_history, last_turns, session_title, session_archived = _build_session_history_records(
                         session_snapshot,
                         req.history,
-                        req.message,
+                        original_user_message,
                         visible_reply,
                         thinking,
                         message_id,
                         final_tool_traces,
+                        user_image_b64=user_image_thumbs or None,
+                        user_files=user_files_meta or None,
                     )
                     response_history, _ = _finalize_history(full_history)
                     persisted_updated_at = _persist_session_snapshot(
@@ -956,7 +1075,7 @@ def create_app() -> FastAPI:
                     })
                     _persist_session_summary(
                         prev_summary=summary,
-                        user_msg=req.message,
+                        user_msg=original_user_message,
                         assistant_msg=visible_reply,
                         user_id=user_id,
                         session_id=sid,

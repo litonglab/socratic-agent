@@ -14,6 +14,7 @@ import {
   X as XIcon,
   CornerDownLeft,
   Lightbulb,
+  Paperclip,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import Markdown from "./Markdown"
@@ -37,6 +38,8 @@ export interface ChatMessage {
   message_id?: string | null
   feedback?: FeedbackValue
   images?: string[] // base64 data URLs（用户消息附带）
+  /** 用户消息附带的非图片附件元信息（仅展示用，文件本体不持久化） */
+  files?: Array<{ name: string; size?: number }>
   // assistant 专用：用于轨迹面板和苏格拉底层级 chip
   tool_traces?: ToolTrace[]
   state?: ChatState
@@ -523,6 +526,25 @@ function MessageRow({
             </div>
           )}
 
+          {isUser && m.files && m.files.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              {m.files.map((f, idx) => (
+                <span
+                  key={idx}
+                  className="inline-flex items-center gap-1 max-w-[220px] h-6 px-2 rounded-md bg-white/15 text-[12px] border border-white/30"
+                  title={
+                    f.size !== undefined
+                      ? `${f.name} · ${formatBytes(f.size)}`
+                      : f.name
+                  }
+                >
+                  <Paperclip className="w-3 h-3 shrink-0" />
+                  <span className="truncate">{f.name}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
           {editing ? (
             <div className="flex flex-col gap-2 min-w-[280px]">
               <textarea
@@ -640,6 +662,12 @@ function FollowUpChips({
       </div>
     </div>
   )
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`
 }
 
 /** 切换会话期间的占位骨架，避免空白闪烁 */
