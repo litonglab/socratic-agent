@@ -1,5 +1,13 @@
 import { useState } from "react"
-import { ChevronUp, LogOut, ArchiveRestore, Trash2, ChevronDown, ChevronRight } from "lucide-react"
+import {
+  ChevronUp,
+  LogOut,
+  ArchiveRestore,
+  Trash2,
+  ChevronDown,
+  ChevronRight,
+  AlertTriangle,
+} from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
@@ -25,6 +33,7 @@ export default function UserCard({
   const initial = (user.username?.[0] || "U").toUpperCase()
   const className = (user.profile?.class_name || "").trim() || "未填写班级"
   const [archOpen, setArchOpen] = useState(false)
+  const [confirmLogout, setConfirmLogout] = useState(false)
 
   return (
     <div className="border-t border-[hsl(var(--border))] bg-white/97 backdrop-blur-sm px-2 py-2">
@@ -102,15 +111,43 @@ export default function UserCard({
           )}
 
           <Separator className="my-1" />
-          <Button
-            variant="ghost"
-            size="sm"
-            className="w-full justify-start gap-2"
-            onClick={onLogout}
-          >
-            <LogOut className="w-4 h-4" />
-            退出登录
-          </Button>
+          {!confirmLogout ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start gap-2"
+              onClick={() => setConfirmLogout(true)}
+            >
+              <LogOut className="w-4 h-4" />
+              退出登录
+            </Button>
+          ) : (
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-2 space-y-1.5">
+              <div className="flex items-start gap-1.5 text-xs text-amber-900">
+                <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                <span>确认退出当前账号？</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  className="flex-1 text-xs px-2 py-1 rounded-md bg-white border border-[hsl(var(--border))] hover:bg-[hsl(var(--accent))]"
+                  onClick={() => setConfirmLogout(false)}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="flex-1 text-xs px-2 py-1 rounded-md bg-[hsl(var(--destructive))] text-white hover:opacity-90"
+                  onClick={() => {
+                    setConfirmLogout(false)
+                    onLogout()
+                  }}
+                >
+                  确认退出
+                </button>
+              </div>
+            </div>
+          )}
         </PopoverContent>
       </Popover>
     </div>

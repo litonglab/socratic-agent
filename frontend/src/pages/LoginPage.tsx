@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react"
 import { useNavigate } from "react-router-dom"
-import { Lock, User, AlertCircle, Loader2 } from "lucide-react"
+import { Lock, User, AlertCircle, Loader2, ArrowLeft } from "lucide-react"
 import { login, register } from "@/lib/api"
 import type { AuthState } from "@/hooks/useAuth"
 import { Button } from "@/components/ui/button"
@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { RegisterRules, type RegisterField } from "@/lib/validate"
+import BrandLogo from "@/components/BrandLogo"
 
 interface Props {
   auth: AuthState
@@ -18,15 +19,18 @@ const REG_FIELDS: Array<{
   label: string
   placeholder: string
   type?: string
+  step: 1 | 2
 }> = [
-  { key: "username", label: "用户名", placeholder: "字母数字，最多 10 位" },
-  { key: "password", label: "密码", placeholder: "至少 8 位字母+数字", type: "password" },
-  { key: "name", label: "姓名", placeholder: "请输入姓名" },
-  { key: "student_id", label: "学号", placeholder: "请输入学号" },
-  { key: "nickname", label: "昵称", placeholder: "请输入昵称" },
-  { key: "class_name", label: "班级", placeholder: "如：计算机网络1班" },
-  { key: "email", label: "邮箱", placeholder: "name@example.com", type: "email" },
+  { key: "username", label: "用户名", placeholder: "字母数字，最多 10 位", step: 1 },
+  { key: "password", label: "密码", placeholder: "至少 8 位字母+数字", type: "password", step: 1 },
+  { key: "name", label: "姓名", placeholder: "请输入姓名", step: 2 },
+  { key: "student_id", label: "学号", placeholder: "请输入学号", step: 2 },
+  { key: "nickname", label: "昵称", placeholder: "请输入昵称", step: 2 },
+  { key: "class_name", label: "班级", placeholder: "如：计算机网络1班", step: 2 },
+  { key: "email", label: "邮箱", placeholder: "name@example.com", type: "email", step: 2 },
 ]
+const STEP1_FIELDS = REG_FIELDS.filter((f) => f.step === 1)
+const STEP2_FIELDS = REG_FIELDS.filter((f) => f.step === 2)
 
 export default function LoginPage({ auth }: Props) {
   const navigate = useNavigate()
@@ -41,9 +45,15 @@ export default function LoginPage({ auth }: Props) {
   async function onLogin(e: React.FormEvent) {
     e.preventDefault()
     setErr(null)
+    const username = u.trim()
+    const password = p.trim()
+    if (!username || !password) {
+      setErr("用户名和密码不能为空")
+      return
+    }
     setLoading(true)
     try {
-      const res = await login(u, p)
+      const res = await login(username, password)
       auth.setSession(res.token, res.user)
       navigate("/")
     } catch (ex) {
@@ -66,6 +76,7 @@ export default function LoginPage({ auth }: Props) {
   const [submitAttempted, setSubmitAttempted] = useState(false)
   const [regErr, setRegErr] = useState<string | null>(null)
   const [regLoading, setRegLoading] = useState(false)
+  const [regStep, setRegStep] = useState<1 | 2>(1)
 
   // 实时错误
   const liveErrors = useMemo(() => {
@@ -92,11 +103,27 @@ export default function LoginPage({ auth }: Props) {
     return REG_FIELDS.every((f) => RegisterRules[f.key].strict(reg[f.key]) === null)
   }, [reg])
 
+  const step1Valid = useMemo(
+    () => STEP1_FIELDS.every((f) => RegisterRules[f.key].strict(reg[f.key]) === null),
+    [reg],
+  )
+
+  function onNextStep() {
+    setSubmitAttempted(true)
+    if (!step1Valid) return
+    setSubmitAttempted(false)
+    setRegStep(2)
+  }
+
   async function onRegister(e: React.FormEvent) {
     e.preventDefault()
     setRegErr(null)
     setSubmitAttempted(true)
-    if (!allValid) return
+    if (!allValid) {
+      // 校验失败，回到第一步以便用户先修复账号字段
+      if (!step1Valid) setRegStep(1)
+      return
+    }
     setRegLoading(true)
     try {
       const res = await register(reg)
@@ -112,11 +139,12 @@ export default function LoginPage({ auth }: Props) {
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-8">
       <div className="w-full max-w-md">
-        <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-b from-[#A42A1E] to-[#861A11] text-white text-2xl font-extrabold shadow-md mb-3">
-            N
-          </div>
+        <div className="flex flex-col items-center mb-6">
+          <BrandLogo size={56} roundedClass="rounded-2xl" className="mb-3" />
           <h1 className="text-3xl font-bold text-[hsl(var(--primary))]">NetRUC Agent</h1>
+          <p className="text-sm text-[hsl(var(--muted-foreground))] mt-1">
+            计算机网络实验教学助手
+          </p>
         </div>
 
         <div className="rounded-2xl border border-[hsl(var(--border))] bg-white shadow-[0_12px_32px_rgba(53,29,24,0.10)] overflow-hidden">
@@ -157,7 +185,11 @@ export default function LoginPage({ auth }: Props) {
                     <span>{err}</span>
                   </div>
                 )}
-                <Button type="submit" className="w-full" disabled={loading || !u || !p}>
+                <Button
+                  type="submit"
+                  className="w-full"
+                  disabled={loading || !u.trim() || !p.trim()}
+                >
                   {loading && <Loader2 className="w-4 h-4 animate-spin" />}
                   登录
                 </Button>
@@ -166,7 +198,21 @@ export default function LoginPage({ auth }: Props) {
 
             <TabsContent value="register">
               <form onSubmit={onRegister} className="px-6 pb-6 pt-2 space-y-3">
-                {REG_FIELDS.map((f) => {
+                <div className="flex items-center gap-2 text-xs text-[hsl(var(--muted-foreground))] mb-1">
+                  <span
+                    className={`px-1.5 py-0.5 rounded-full ${regStep === 1 ? "bg-[hsl(var(--primary))] text-white font-semibold" : "bg-[hsl(var(--accent))]"}`}
+                  >
+                    1 · 账号
+                  </span>
+                  <span className="opacity-50">→</span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded-full ${regStep === 2 ? "bg-[hsl(var(--primary))] text-white font-semibold" : "bg-[hsl(var(--accent))]"}`}
+                  >
+                    2 · 个人资料
+                  </span>
+                </div>
+
+                {(regStep === 1 ? STEP1_FIELDS : STEP2_FIELDS).map((f) => {
                   const error = strictErrors[f.key]
                   return (
                     <div key={f.key} className="space-y-1">
@@ -194,10 +240,28 @@ export default function LoginPage({ auth }: Props) {
                     <span>{regErr}</span>
                   </div>
                 )}
-                <Button type="submit" className="w-full" disabled={regLoading}>
-                  {regLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                  注册
-                </Button>
+
+                {regStep === 1 ? (
+                  <Button type="button" className="w-full" onClick={onNextStep}>
+                    下一步
+                  </Button>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="flex-1 gap-1.5"
+                      onClick={() => setRegStep(1)}
+                    >
+                      <ArrowLeft className="w-4 h-4" />
+                      上一步
+                    </Button>
+                    <Button type="submit" className="flex-1" disabled={regLoading}>
+                      {regLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                      完成注册
+                    </Button>
+                  </div>
+                )}
               </form>
             </TabsContent>
           </Tabs>

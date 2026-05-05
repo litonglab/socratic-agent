@@ -11,6 +11,43 @@ from agentic_rag.web_search import WebSearch
 from dataclasses import dataclass
 from agentic_rag.utils import _coerce_to_text
 from agentic_rag.llm_config import build_chat_llm
+from agentic_rag.chat_format import split_assistant_content
+
+
+# 流式 forward 时需要保护的标签前缀：当 visible 末尾正在形成下列任意标签的开头，
+# 暂不 forward 这段不完整后缀，等下一帧 token 到来再决定。
+_PROTECTED_TAG_PREFIXES = (
+    "<思考>",
+    "</思考>",
+    "<thinking>",
+    "</thinking>",
+    "<tool_calls>",
+    "</tool_calls>",
+)
+
+
+def _strip_unsafe_tail(text: str) -> str:
+    """
+    若 text 末尾正在形成某个受保护标签（如 "<思考" / "<too" 等不完整片段），
+    返回去掉该不完整片段后的安全前缀；否则原样返回。
+
+    保守策略：从最长可能的尾部子串向短的方向找匹配，命中即截断。
+    """
+    if not text:
+        return text
+    # 限制扫描深度，避免长度极端时浪费
+    max_tag_len = max(len(t) for t in _PROTECTED_TAG_PREFIXES)
+    scan_len = min(len(text), max_tag_len)
+    for k in range(scan_len, 0, -1):
+        suffix = text[-k:]
+        # case-insensitive 匹配（兼容 <thinking>）
+        suffix_lower = suffix.lower()
+        for tag in _PROTECTED_TAG_PREFIXES:
+            tag_lower = tag.lower()
+            # text 末尾正好是 tag 的某个前缀（且不是完整 tag —— 完整 tag 应交给 split_assistant_content 处理）
+            if k < len(tag) and tag_lower.startswith(suffix_lower):
+                return text[:-k]
+    return text
 from .prompts import (
     BASE_PROMPT_LAB,
     BASE_PROMPT_THEORY,
@@ -1209,13 +1246,21 @@ def query_stream(
 ):
     """
     流式版 query()。yield 字典：
-      {"type": "token", "content": "..."}   — 流式 token
+      {"type": "stage", "stage": "analyzing|tools|generating", "tools": [..]?}  — 阶段提示
+      {"type": "thinking", "content": "..."}                                    — 流式思考增量（<思考> 标签内）
+      {"type": "token", "content": "..."}                                       — 流式可见 token
       {"type": "done", "result": str, "history": List, "tool_traces": List, "state": Dict}
+    说明：
+      - 思考块（<思考>...</思考> 或未闭合的 <思考>...）会被流式拆成 thinking 增量发出，
+        前端展示在气泡上方；token 流不再包含 <思考>/</思考>/<tool_calls> 等标签。
     """
     if history is None:
         history = []
     if state is None:
         state = {}
+
+    # 阶段：意图分析 / 上下文准备
+    yield {"type": "stage", "stage": "analyzing"}
 
     ctx = _prepare_context(
         question, history, state, user_id, enable_websearch, allow_process_explanations, debug
@@ -1226,6 +1271,7 @@ def query_stream(
     if ctx.early_reply is not None:
         history.append(HumanMessage(content=question))
         history.append(AIMessage(content=ctx.early_reply))
+        yield {"type": "stage", "stage": "generating"}
         yield {"type": "token", "content": ctx.early_reply}
         yield {"type": "done", "result": ctx.early_reply, "history": history,
                "tool_traces": [], "state": state}
@@ -1236,7 +1282,11 @@ def query_stream(
         bot = Agent(ctx.final_prompt, history)
         bot.messages.append(HumanMessage(content=q))
         final_result = ""
+        first_token = True
         for token in bot.execute_stream():
+            if first_token:
+                yield {"type": "stage", "stage": "generating"}
+                first_token = False
             final_result += token
             yield {"type": "token", "content": token}
         history.append(HumanMessage(content=question))
@@ -1250,15 +1300,38 @@ def query_stream(
     tool_traces: List[Dict[str, Any]] = []
     last_citations: List[Dict[str, Any]] = []
     final_result = ""
+    # 跨轮聚合的"思考过程"——done 时返回前端，确保用户在生成回答后能查看完整思考记录
+    aggregated_thinking_segments: List[str] = []
     bot.add_user_message(q)
 
     for i in range(max_turns):
         accumulated = ""
         found_actions: List[ToolActionMatch] = []
         started_forwarding = False
+        last_visible = ""
+        last_thinking = ""
 
         for token in bot.execute_stream():
             accumulated += token
+
+            # 实时把累积文本拆成思考块与可见正文（兼容未闭合的 <思考>...）
+            parsed = split_assistant_content(accumulated)
+            cur_thinking = parsed.get("thinking") or ""
+            cur_visible = parsed.get("visible") or ""
+
+            # 思考块增量 yield（思考流式期间通常单调追加；末尾 strip 抖动也用 startswith 判定）
+            if cur_thinking and cur_thinking != last_thinking:
+                if cur_thinking.startswith(last_thinking):
+                    delta = cur_thinking[len(last_thinking):]
+                else:
+                    # 罕见：strip 抖动导致前缀不一致；退化为整段重发首段
+                    delta = cur_thinking
+                if delta:
+                    yield {"type": "thinking", "content": delta}
+                last_thinking = cur_thinking
+
+            # 末尾若正在形成新标签，先剪掉不完整后缀，避免 "<思考" / "<too" 这种半成品被 forward
+            safe_visible = _strip_unsafe_tail(cur_visible)
 
             if not started_forwarding:
                 found_actions = _find_actions_in_stream_buffer(accumulated)
@@ -1268,14 +1341,34 @@ def query_stream(
                 if _has_open_tool_calls_block(accumulated):
                     continue
 
-                lines = accumulated.split("\n")
-                if len(lines) > 2 or (len(accumulated) > 80 and "\n" in accumulated):
+                # 用"可见正文"长度判定 forward 阈值，避免 <思考> 把阈值打满
+                visible_lines = safe_visible.split("\n")
+                if len(visible_lines) > 2 or (len(safe_visible) > 80 and "\n" in safe_visible):
                     started_forwarding = True
-                    yield {"type": "token", "content": accumulated}
+                    yield {"type": "stage", "stage": "generating"}
+                    if safe_visible:
+                        yield {"type": "token", "content": safe_visible}
+                    last_visible = safe_visible
             else:
-                yield {"type": "token", "content": token}
+                # forward 阶段：只推送 safe_visible 增量，绝不把 <思考> / <tool_calls> 转给前端
+                if safe_visible != last_visible and safe_visible.startswith(last_visible):
+                    delta_v = safe_visible[len(last_visible):]
+                    if delta_v:
+                        yield {"type": "token", "content": delta_v}
+                    last_visible = safe_visible
+                elif safe_visible != last_visible and last_visible.startswith(safe_visible):
+                    # safe_visible 比 last_visible 短：可能是新的不完整标签出现导致回退
+                    # 不发送回退 token（前端无法 unyield），保持 last_visible 等待下一帧
+                    pass
+                elif safe_visible != last_visible:
+                    # 异常路径：完全非追加变化，退化整体替换不再重发
+                    last_visible = safe_visible
 
         full_turn_text = getattr(bot, '_last_stream_result', accumulated)
+
+        # 把这一轮的最终思考段落沉淀到聚合列表里
+        if last_thinking:
+            aggregated_thinking_segments.append(last_thinking)
 
         action_matches = found_actions or _find_actions(full_turn_text)
         if action_matches:
@@ -1283,6 +1376,11 @@ def query_stream(
                 print(f"[DEBUG] Parsed {len(action_matches)} tool actions in streaming turn {i + 1}")
             tool_calls = _build_tool_calls(action_matches, i + 1)
             bot.add_ai_message(full_turn_text, tool_calls=tool_calls)
+            yield {
+                "type": "stage",
+                "stage": "tools",
+                "tools": [m.tool for m in action_matches],
+            }
             observations = _execute_tool_actions(
                 action_matches, ctx.contextual_actions, tool_traces, last_citations
             )
@@ -1317,8 +1415,14 @@ def query_stream(
         history.append(HumanMessage(content=question))
         history.append(AIMessage(content=final_result))
 
+    # 聚合所有轮思考；与最后一轮模型自带的 <思考>...</思考> 合并去重
+    aggregated_thinking = "\n\n".join(
+        seg.strip() for seg in aggregated_thinking_segments if seg and seg.strip()
+    ).strip()
+
     yield {"type": "done", "result": final_result, "history": history,
-           "tool_traces": tool_traces, "state": state or {}}
+           "tool_traces": tool_traces, "state": state or {},
+           "thinking_full": aggregated_thinking}
 
 
 # -------------------------------------------------------------------------

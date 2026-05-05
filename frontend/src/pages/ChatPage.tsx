@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react"
+import { useEffect, useState, useCallback, useRef } from "react"
 import { useNavigate } from "react-router-dom"
 import { PanelLeftOpen } from "lucide-react"
 import {
@@ -9,8 +9,10 @@ import {
   submitFeedback,
   archiveSession,
   unarchiveSession,
+  renameSession as apiRenameSession,
   type SessionMeta,
 } from "@/lib/api"
+import { toast } from "@/lib/toast"
 import type { AuthState } from "@/hooks/useAuth"
 import Sidebar from "@/components/Sidebar"
 import MessageList, { type ChatMessage, type FeedbackValue } from "@/components/MessageList"
@@ -22,7 +24,10 @@ const SIDEBAR_KEY = "netruc_sidebar_open"
 function readSidebarOpen(): boolean {
   if (typeof window === "undefined") return true
   const v = window.localStorage.getItem(SIDEBAR_KEY)
-  if (v === null) return true
+  if (v === null) {
+    // 首次访问：移动端默认收起，桌面端默认展开
+    return !window.matchMedia("(max-width: 767px)").matches
+  }
   return v === "1"
 }
 
@@ -38,6 +43,22 @@ export default function ChatPage({ auth }: Props) {
   const [streaming, setStreaming] = useState(false)
   const [websearch, setWebsearch] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(readSidebarOpen)
+  // 流式请求的 AbortController：切换会话 / 卸载 / 用户主动停止时取消
+  const abortRef = useRef<AbortController | null>(null)
+
+  const cancelStream = useCallback(() => {
+    if (abortRef.current) {
+      abortRef.current.abort()
+      abortRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      // 组件卸载时也取消，避免悬挂请求
+      if (abortRef.current) abortRef.current.abort()
+    }
+  }, [])
 
   useEffect(() => {
     try {
@@ -68,10 +89,26 @@ export default function ChatPage({ auth }: Props) {
   }, [])
 
   useEffect(() => {
-    if (auth.user) void reloadSessions()
-  }, [auth.user, reloadSessions])
+    if (!auth.user) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { sessions } = await listSessions()
+        if (!cancelled) setSessions(sessions || [])
+      } catch (e) {
+        console.warn("[ChatPage] listSessions failed:", e)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [auth.user])
 
   async function selectSession(id: string) {
+    if (id === activeId) return
+    // 切换会话时先取消正在进行的流式请求，避免新会话被旧 stream 写脏
+    cancelStream()
+    setStreaming(false)
     setActiveId(id)
     try {
       const data = await fetchSessionMessages(id)
@@ -92,6 +129,8 @@ export default function ChatPage({ auth }: Props) {
   }
 
   function newSession() {
+    cancelStream()
+    setStreaming(false)
     setActiveId(null)
     setMessages([])
   }
@@ -99,8 +138,10 @@ export default function ChatPage({ auth }: Props) {
   async function deleteSess(id: string) {
     try {
       await apiDeleteSession(id)
+      toast.success("会话已删除")
     } catch (e) {
       console.warn("[ChatPage] delete failed:", e)
+      toast.error(`删除失败：${(e as Error).message}`)
     }
     if (id === activeId) {
       setActiveId(null)
@@ -112,8 +153,10 @@ export default function ChatPage({ auth }: Props) {
   async function archiveSess(id: string) {
     try {
       await archiveSession(id)
+      toast.info("已归档")
     } catch (e) {
       console.warn("[ChatPage] archive failed:", e)
+      toast.error(`归档失败：${(e as Error).message}`)
     }
     void reloadSessions()
   }
@@ -121,10 +164,66 @@ export default function ChatPage({ auth }: Props) {
   async function unarchiveSess(id: string) {
     try {
       await unarchiveSession(id)
+      toast.info("已恢复")
     } catch (e) {
       console.warn("[ChatPage] unarchive failed:", e)
+      toast.error(`恢复失败：${(e as Error).message}`)
     }
     void reloadSessions()
+  }
+
+  async function renameSess(id: string, title: string) {
+    // 乐观更新：先改本地，失败则回滚 + toast
+    setSessions((prev) =>
+      prev.map((s) => (s.session_id === id ? { ...s, title } : s)),
+    )
+    try {
+      await apiRenameSession(id, title)
+      toast.success("已重命名")
+    } catch (e) {
+      console.warn("[ChatPage] rename failed:", e)
+      toast.error(`重命名失败：${(e as Error).message}`)
+      void reloadSessions()
+    }
+  }
+
+  /**
+   * 重新生成：找到该 assistant 消息对应的上一条 user 消息，
+   * 截断 stored_history 到 user 之前，再用同样的 user message 重发。
+   */
+  async function handleRegenerate(assistantMessageId: string) {
+    if (streaming) return
+    let assistantIdx = -1
+    let userIdx = -1
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].message_id === assistantMessageId) {
+        assistantIdx = i
+        break
+      }
+    }
+    if (assistantIdx < 0) return
+    for (let i = assistantIdx - 1; i >= 0; i--) {
+      if (messages[i].role === "user") {
+        userIdx = i
+        break
+      }
+    }
+    if (userIdx < 0) return
+    const userMsg = messages[userIdx]
+    setMessages(messages.slice(0, userIdx))
+    await send(userMsg.content || "", [], { truncateTo: userIdx })
+  }
+
+  /**
+   * 编辑用户消息后重发：截断到该用户消息之前，使用新文本重发。
+   * 旧的图片附件不带过去（用户编辑文字常意味着重启上下文）。
+   */
+  async function handleEditAndResend(userMessageIndex: number, newText: string) {
+    if (streaming) return
+    if (userMessageIndex < 0 || userMessageIndex >= messages.length) return
+    if (messages[userMessageIndex].role !== "user") return
+    setMessages(messages.slice(0, userMessageIndex))
+    await send(newText, [], { truncateTo: userMessageIndex })
   }
 
   async function onFeedback(messageId: string, next: "like" | "dislike" | "cancel") {
@@ -144,7 +243,11 @@ export default function ChatPage({ auth }: Props) {
     )
   }
 
-  async function send(text: string, images: AttachedImage[]) {
+  async function send(
+    text: string,
+    images: AttachedImage[],
+    opts: { truncateTo?: number } = {},
+  ) {
     if (streaming) return
     const userMsg: ChatMessage = {
       role: "user",
@@ -155,32 +258,74 @@ export default function ChatPage({ auth }: Props) {
     setMessages((prev) => [...prev, userMsg, assistantPending])
     setStreaming(true)
 
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+
     try {
       let resolvedSid: string | null = activeId
       let bufVisible = ""
       let respMessageId: string | null = null
       let respThinking = ""
-      for await (const ev of chatStream({
-        message: text,
-        session_id: activeId,
-        enable_websearch: websearch,
-        images: images.length
-          ? images.map((i) => ({ base64: i.base64, mime: i.mime }))
-          : undefined,
-      })) {
+      for await (const ev of chatStream(
+        {
+          message: text,
+          session_id: activeId,
+          enable_websearch: websearch,
+          truncate_history_to: opts.truncateTo,
+          images: images.length
+            ? images.map((i) => ({ base64: i.base64, mime: i.mime }))
+            : undefined,
+        },
+        ctrl.signal,
+      )) {
+        // 若用户切换到了别的会话，发起此次请求时的 sid 与当前 active 不一致，
+        // 这次流式产物已不再属于当前视图，丢弃即可（实际请求也已被 abort）
+        if (ctrl.signal.aborted) break
         if (ev.type === "meta") {
           resolvedSid = ev.session_id || resolvedSid
           respMessageId = ev.message_id || respMessageId
           if (resolvedSid && resolvedSid !== activeId) {
             setActiveId(resolvedSid)
           }
+        } else if (ev.type === "stage") {
+          // 流式阶段提示：analyzing / tools / generating
+          setMessages((prev) => {
+            const next = [...prev]
+            const last = next[next.length - 1]
+            if (last && last.role === "assistant" && last.pending) {
+              next[next.length - 1] = {
+                ...last,
+                stage: ev.stage,
+                stage_tools: ev.tools,
+              }
+            }
+            return next
+          })
+        } else if (ev.type === "thinking_delta" && ev.content) {
+          // 流式思考增量：累积到 streaming_thinking，气泡上方斜体浅色显示
+          setMessages((prev) => {
+            const next = [...prev]
+            const last = next[next.length - 1]
+            if (last && last.role === "assistant" && last.pending) {
+              next[next.length - 1] = {
+                ...last,
+                streaming_thinking: (last.streaming_thinking || "") + ev.content,
+              }
+            }
+            return next
+          })
         } else if (ev.type === "token" && ev.content) {
           bufVisible += ev.content
           setMessages((prev) => {
             const next = [...prev]
             const last = next[next.length - 1]
             if (last && last.role === "assistant") {
-              next[next.length - 1] = { ...last, content: bufVisible, pending: true }
+              next[next.length - 1] = {
+                ...last,
+                content: bufVisible,
+                pending: true,
+                stage: "generating",
+              }
             }
             return next
           })
@@ -197,6 +342,8 @@ export default function ChatPage({ auth }: Props) {
                 thinking: respThinking || undefined,
                 message_id: respMessageId,
                 feedback: null,
+                tool_traces: ev.tool_traces,
+                state: ev.state,
               }
             }
             return next
@@ -216,15 +363,37 @@ export default function ChatPage({ auth }: Props) {
         }
       }
     } catch (e) {
-      setMessages((prev) => {
-        const next = [...prev]
-        const last = next[next.length - 1]
-        if (last && last.role === "assistant") {
-          next[next.length - 1] = { role: "assistant", content: `生成失败：${(e as Error).message}` }
-        }
-        return next
-      })
+      // AbortError 是用户主动取消（切换会话 / 停止生成），不展示为"生成失败"
+      const err = e as Error & { name?: string }
+      if (err?.name === "AbortError") {
+        // 取消时把最后一条 pending 的助手消息标记为已停止（若仍是 pending）
+        setMessages((prev) => {
+          const next = [...prev]
+          const last = next[next.length - 1]
+          if (last && last.role === "assistant" && last.pending) {
+            next[next.length - 1] = {
+              ...last,
+              pending: false,
+              content: last.content || "（已停止生成）",
+            }
+          }
+          return next
+        })
+      } else {
+        setMessages((prev) => {
+          const next = [...prev]
+          const last = next[next.length - 1]
+          if (last && last.role === "assistant") {
+            next[next.length - 1] = {
+              role: "assistant",
+              content: `生成失败：${err.message || "未知错误"}`,
+            }
+          }
+          return next
+        })
+      }
     } finally {
+      if (abortRef.current === ctrl) abortRef.current = null
       setStreaming(false)
       void reloadSessions()
     }
@@ -239,11 +408,14 @@ export default function ChatPage({ auth }: Props) {
   }
 
   return (
-    <div className="h-screen flex overflow-hidden">
-      {/* sidebar 容器：通过宽度+overflow 实现折叠动画 */}
+    <div className="h-screen flex overflow-hidden relative">
+      {/* sidebar 容器：
+           - md+ 屏幕：侧栏内联占位，宽度由 sidebarOpen 控制（折叠动画）
+           - <md 屏幕：侧栏脱离文档流变成 overlay drawer，配合遮罩 */}
       <div
         className={cn(
           "shrink-0 overflow-hidden transition-[width] duration-200 ease-out",
+          "max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:shadow-2xl",
           sidebarOpen ? "w-72" : "w-0",
         )}
       >
@@ -252,11 +424,22 @@ export default function ChatPage({ auth }: Props) {
             user={auth.user}
             sessions={sessions}
             activeId={activeId}
-            onNew={newSession}
-            onSelect={selectSession}
+            onNew={() => {
+              newSession()
+              if (window.matchMedia("(max-width: 767px)").matches) {
+                setSidebarOpen(false)
+              }
+            }}
+            onSelect={(id) => {
+              void selectSession(id)
+              if (window.matchMedia("(max-width: 767px)").matches) {
+                setSidebarOpen(false)
+              }
+            }}
             onDelete={deleteSess}
             onArchive={archiveSess}
             onUnarchive={unarchiveSess}
+            onRename={renameSess}
             onCollapse={() => setSidebarOpen(false)}
             onLogout={() => {
               auth.logout()
@@ -266,8 +449,16 @@ export default function ChatPage({ auth }: Props) {
         </div>
       </div>
 
-      <main className="flex-1 min-w-0 flex flex-col relative">
-        {/* sidebar 收起时，主区域左上角浮一个展开按钮（展开状态由 sidebar 内自带的折叠按钮控制） */}
+      {/* 移动端 drawer 遮罩 */}
+      {sidebarOpen && (
+        <div
+          className="md:hidden absolute inset-0 z-30 bg-black/30 backdrop-blur-[1px]"
+          onClick={() => setSidebarOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      <main className="flex-1 min-w-0 flex flex-col relative bg-[#FAF6F4]/40">
         {!sidebarOpen && (
           <button
             type="button"
@@ -279,12 +470,20 @@ export default function ChatPage({ auth }: Props) {
             <PanelLeftOpen className="w-4 h-4" />
           </button>
         )}
-        <MessageList messages={messages} onFeedback={onFeedback} />
+        <MessageList
+          messages={messages}
+          onFeedback={onFeedback}
+          onRegenerate={handleRegenerate}
+          onEditAndResend={handleEditAndResend}
+          onPickSuggestion={(t) => void send(t, [])}
+        />
         <ChatInput
           disabled={streaming}
+          streaming={streaming}
           websearch={websearch}
           onWebsearchChange={setWebsearch}
-          onSend={send}
+          onSend={(t, imgs) => void send(t, imgs)}
+          onStop={cancelStream}
         />
       </main>
     </div>

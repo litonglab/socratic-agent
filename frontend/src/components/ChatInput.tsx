@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react"
-import { Send, Paperclip, Loader2, Globe, X } from "lucide-react"
+import { Send, Paperclip, Loader2, Globe, X, Square } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -12,15 +12,25 @@ export interface AttachedImage {
 
 interface Props {
   disabled?: boolean
+  /** 是否处于流式输出中：true 时把发送按钮替换为"停止" */
+  streaming?: boolean
   websearch: boolean
   onWebsearchChange: (v: boolean) => void
   onSend: (text: string, images: AttachedImage[]) => void
+  onStop?: () => void
 }
 
 const MAX_IMAGES = 4
 const MAX_BYTES = 8 * 1024 * 1024 // 8MB
 
-export default function ChatInput({ disabled, websearch, onWebsearchChange, onSend }: Props) {
+export default function ChatInput({
+  disabled,
+  streaming,
+  websearch,
+  onWebsearchChange,
+  onSend,
+  onStop,
+}: Props) {
   const [text, setText] = useState("")
   const [images, setImages] = useState<AttachedImage[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -159,18 +169,21 @@ export default function ChatInput({ disabled, websearch, onWebsearchChange, onSe
             />
             <button
               type="button"
+              role="switch"
+              aria-checked={websearch}
               onClick={() => onWebsearchChange(!websearch)}
               className={cn(
                 "inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition-colors",
                 websearch
-                  ? "bg-[hsl(var(--primary)/0.10)] border-[hsl(var(--primary)/0.35)] text-[hsl(var(--primary))]"
-                  : "bg-white border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary)/0.4)] hover:text-[hsl(var(--primary))]",
+                  ? "bg-[hsl(var(--primary)/0.08)] border-[hsl(var(--primary)/0.3)] text-[hsl(var(--primary))]"
+                  : "bg-[hsl(var(--accent))]/40 border-transparent text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))]",
               )}
               title={websearch ? "联网搜索：已开启" : "联网搜索：未开启"}
             >
               <Globe className="w-3.5 h-3.5" />
               联网搜索
               <span
+                aria-hidden="true"
                 className={cn(
                   "ml-0.5 inline-block w-7 h-3.5 rounded-full transition-colors relative",
                   websearch ? "bg-[hsl(var(--primary))]" : "bg-[hsl(var(--border))]",
@@ -185,14 +198,33 @@ export default function ChatInput({ disabled, websearch, onWebsearchChange, onSe
               </span>
             </button>
             <div className="flex-1" />
-            <Button
-              size="icon"
-              onClick={submit}
-              disabled={disabled || (!text.trim() && images.length === 0)}
-              className="shrink-0 w-9 h-9 rounded-xl"
-            >
-              {disabled ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-            </Button>
+            {streaming && onStop ? (
+              <Button
+                size="icon"
+                onClick={onStop}
+                variant="outline"
+                className="shrink-0 w-9 h-9 rounded-xl border-[hsl(var(--primary)/0.4)] text-[hsl(var(--primary))] hover:bg-[hsl(var(--primary)/0.08)]"
+                title="停止生成"
+                aria-label="停止生成"
+              >
+                <Square className="w-4 h-4 fill-current" />
+              </Button>
+            ) : (
+              <Button
+                size="icon"
+                onClick={submit}
+                disabled={disabled || (!text.trim() && images.length === 0)}
+                className="shrink-0 w-9 h-9 rounded-xl"
+                title="发送 (Enter)"
+                aria-label="发送"
+              >
+                {disabled ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+              </Button>
+            )}
           </div>
         </div>
       </div>

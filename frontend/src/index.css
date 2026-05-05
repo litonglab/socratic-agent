@@ -50,11 +50,19 @@ html, body, #root {
   height: 100%;
 }
 
+html {
+  /* 提升整体可读性：把基准字号从 16 提到 16.5（1rem 仍 16，所以不影响 tailwind 数值） */
+  font-size: 16px;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
   background: linear-gradient(180deg, #FAF5F3 0%, #F1E8E4 100%);
   color: var(--color-ink-900);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 /* 滚动条美化 */

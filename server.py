@@ -142,6 +142,9 @@ class ChatRequest(BaseModel):
     history: Optional[List[Dict[str, str]]] = None
     debug: bool = False
     max_turns: int = 5
+    # 重新生成 / 编辑重发场景：在沿用 stored_history 之前先截断到指定长度（含义：保留前 N 条对话）。
+    # None 表示不截断；0 表示清空。仅影响本次 + 持久化；不会改变其他会话。
+    truncate_history_to: Optional[int] = None
     enable_websearch: bool = True
     allow_process_explanations: bool = True
     images: Optional[List[ChatImageInput]] = None
@@ -166,6 +169,10 @@ class FeedbackRequest(BaseModel):
     session_id: str
     message_id: str
     feedback: Literal["like", "dislike", "cancel"]
+
+
+class RenameSessionRequest(BaseModel):
+    title: str
 
 
 class RegisterRequest(BaseModel):
@@ -445,6 +452,43 @@ def set_session_archive_state(*, token: str, session_id: str, archived: bool) ->
         "ok": True,
         "session_id": session_id,
         "archived": bool(updated.get("archived", archived)) if updated else archived,
+        "updated_at": updated.get("updated_at") if updated else None,
+    }
+
+
+_MAX_SESSION_TITLE_LEN = 80
+
+
+def rename_session_title(*, token: str, session_id: str, title: str) -> Dict[str, Any]:
+    """前端"重命名会话"用：仅更新 title，保留其他字段不变。"""
+    user = _require_user_by_token(token)
+    new_title = (title or "").strip()
+    if not new_title:
+        raise HTTPException(status_code=400, detail="title required")
+    if len(new_title) > _MAX_SESSION_TITLE_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"title too long, max {_MAX_SESSION_TITLE_LEN} chars",
+        )
+    with _hold_session_lock(user["id"], session_id):
+        snapshot = find_session(user["id"], session_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        update_session(
+            user["id"],
+            session_id,
+            summary=snapshot.get("summary", "") or "",
+            last_turns=snapshot.get("last_turns", []) or [],
+            state=snapshot.get("state", {}) or {},
+            history=snapshot.get("history", []) or [],
+            title=new_title,
+            archived=bool(snapshot.get("archived", False)),
+        )
+        updated = find_session(user["id"], session_id)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "title": new_title,
         "updated_at": updated.get("updated_at") if updated else None,
     }
 
@@ -820,6 +864,13 @@ def create_app() -> FastAPI:
                     message_id = f"m_{uuid4().hex[:12]}"
 
                     session_snapshot = get_session(user_id, sid)
+                    # 重新生成 / 编辑重发：在使用 stored_history 之前先截断到指定长度
+                    if req.truncate_history_to is not None and req.truncate_history_to >= 0:
+                        stored = session_snapshot.get("history", []) or []
+                        if isinstance(stored, list):
+                            keep = stored[: req.truncate_history_to]
+                            session_snapshot["history"] = keep
+                            session_snapshot["last_turns"] = keep[-PERSISTED_LAST_TURNS:]
                     history_dicts, _authoritative_history, summary = _choose_history_context(
                         session_snapshot,
                         req.history,
@@ -833,6 +884,7 @@ def create_app() -> FastAPI:
                     final_result = ""
                     final_tool_traces: list = []
                     final_state = state_dict or {}
+                    final_thinking_full = ""
 
                     for event in query_stream(
                         req.message,
@@ -846,12 +898,27 @@ def create_app() -> FastAPI:
                     ):
                         if event["type"] == "token":
                             yield _sse_event("delta", {"content": event["content"]})
+                        elif event["type"] == "thinking":
+                            yield _sse_event("thinking_delta", {"content": event["content"]})
+                        elif event["type"] == "stage":
+                            stage_payload = {"stage": event.get("stage", "")}
+                            if event.get("tools"):
+                                stage_payload["tools"] = list(event["tools"])
+                            yield _sse_event("stage", stage_payload)
                         elif event["type"] == "done":
                             final_result = event["result"]
                             final_tool_traces = event["tool_traces"]
                             final_state = event["state"]
+                            final_thinking_full = event.get("thinking_full") or ""
 
                     visible_reply, thinking = split_visible_and_thinking(final_result)
+                    # 把跨轮聚合的思考与最后一轮模型自带的 <思考> 合并：
+                    # 用换行分隔，避免覆盖某一边的内容。
+                    if final_thinking_full:
+                        if thinking and final_thinking_full not in thinking:
+                            thinking = (final_thinking_full + "\n\n" + thinking).strip()
+                        elif not thinking:
+                            thinking = final_thinking_full
                     full_history, last_turns, session_title, session_archived = _build_session_history_records(
                         session_snapshot,
                         req.history,
@@ -872,6 +939,12 @@ def create_app() -> FastAPI:
                         title=session_title,
                         archived=session_archived,
                     )
+                    # 暴露 hint_level / category 等教学元信息给前端，用于渲染层级 chip
+                    safe_state: Dict[str, Any] = {}
+                    if isinstance(final_state, dict):
+                        for key in ("hint_level", "question_category", "category"):
+                            if key in final_state:
+                                safe_state[key] = final_state[key]
                     yield _sse_event("done", {
                         "session_id": sid,
                         "message_id": message_id,
@@ -879,6 +952,7 @@ def create_app() -> FastAPI:
                         "thinking": thinking,
                         "history": response_history,
                         "tool_traces": [{"tool": t["tool"], "input": t["input"], "output": t["output"]} for t in final_tool_traces],
+                        "state": safe_state,
                     })
                     _persist_session_summary(
                         prev_summary=summary,
@@ -948,6 +1022,15 @@ def create_app() -> FastAPI:
     def unarchive_session_endpoint(session_id: str, authorization: Optional[str] = Header(None)):
         token = _extract_bearer_token(authorization) or ""
         return set_session_archive_state(token=token, session_id=session_id, archived=False)
+
+    @app.patch("/api/sessions/{session_id}")
+    def rename_session_endpoint(
+        session_id: str,
+        req: RenameSessionRequest,
+        authorization: Optional[str] = Header(None),
+    ):
+        token = _extract_bearer_token(authorization) or ""
+        return rename_session_title(token=token, session_id=session_id, title=req.title)
 
     @app.get("/api/sessions/{session_id}")
     def get_session_detail(session_id: str, authorization: Optional[str] = Header(None)):

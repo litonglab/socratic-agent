@@ -27,6 +27,10 @@ async function request<T>(url: string, opts: RequestInit = {}): Promise<T> {
     },
   })
   if (!res.ok) {
+    // 401 视为登录态过期：清 token，让 useAuth 在下一次刷新时把用户踢回 /login
+    if (res.status === 401 && getToken()) {
+      setToken(null)
+    }
     let detail = `${res.status} ${res.statusText}`
     try {
       const data = await res.json()
@@ -113,6 +117,16 @@ export async function unarchiveSession(sessionId: string) {
   return request(`/api/sessions/${sessionId}/unarchive`, { method: "POST" })
 }
 
+export async function renameSession(
+  sessionId: string,
+  title: string,
+): Promise<{ ok: boolean; session_id: string; title: string; updated_at?: string }> {
+  return request(`/api/sessions/${sessionId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  })
+}
+
 export async function fetchSessionMessages(sessionId: string): Promise<{
   session_id: string
   messages: Array<{
@@ -139,17 +153,41 @@ export async function submitFeedback(payload: {
 
 // ===== Streaming chat (SSE-style line-delimited JSON) =====
 
+export interface ToolTrace {
+  tool?: string
+  input?: string
+  output?: string
+}
+
+export interface ChatState {
+  hint_level?: number
+  question_category?: string
+  category?: string
+}
+
+export type ChatStage = "analyzing" | "tools" | "generating" | string
+
 export interface StreamEvent {
-  type: "meta" | "token" | "done" | "error"
+  type:
+    | "meta"
+    | "token"
+    | "thinking_delta"
+    | "stage"
+    | "done"
+    | "error"
   // meta
   message_id?: string
   session_id?: string
-  // token
+  // token / thinking_delta
   content?: string
+  // stage
+  stage?: ChatStage
+  tools?: string[]
   // done
   reply?: string
   thinking?: string
-  tool_traces?: Array<{ tool?: string; input?: string; output?: string }>
+  tool_traces?: ToolTrace[]
+  state?: ChatState
   // error
   error?: string
 }
@@ -166,6 +204,8 @@ export interface ChatStreamRequest {
   max_turns?: number
   history?: null | Array<{ role: string; content: string }>
   images?: ChatImageInput[]
+  /** 重新生成/编辑重发：保留 stored_history 前 N 条，丢弃其后所有对话 */
+  truncate_history_to?: number
 }
 
 /**
@@ -180,7 +220,10 @@ export interface ChatStreamRequest {
  *
  * 返回 async generator，调用方用 for-await-of 消费。
  */
-export async function* chatStream(req: ChatStreamRequest): AsyncGenerator<StreamEvent> {
+export async function* chatStream(
+  req: ChatStreamRequest,
+  signal?: AbortSignal,
+): AsyncGenerator<StreamEvent> {
   const res = await fetch("/api/chat/stream", {
     method: "POST",
     headers: {
@@ -189,8 +232,10 @@ export async function* chatStream(req: ChatStreamRequest): AsyncGenerator<Stream
       ...authHeaders(),
     },
     body: JSON.stringify(req),
+    signal,
   })
   if (!res.ok || !res.body) {
+    if (res.status === 401 && getToken()) setToken(null)
     let detail = `${res.status} ${res.statusText}`
     try {
       const data = await res.json()
