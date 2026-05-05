@@ -11,6 +11,9 @@ langchain-text-splitters
 faiss-cpu
 tqdm
 python-docx
+pypdf
+openpyxl
+python-pptx
 Pillow
 huggingface-hub
 duckduckgo-search

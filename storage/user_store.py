@@ -190,7 +190,8 @@ def _copy_session_messages(messages: Any) -> list:
         if not isinstance(item, dict):
             continue
         copied = dict(item)
-        copied.pop("image_b64", None)
+        # image_b64（图片缩略图）与 files（文件 metadata）都允许写入持久层，
+        # 让历史会话回看时仍能看到当时上传过的附件。
         normalized.append(copied)
     return normalized
 

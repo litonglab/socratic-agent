@@ -135,6 +135,8 @@ export async function fetchSessionMessages(sessionId: string): Promise<{
     message_id?: string | null
     thinking?: string
     image_b64?: string[]
+    /** 历史会话回看：当时上传过的非图片附件元信息（不含原文） */
+    files?: Array<{ name: string; size?: number }>
     feedback?: string | null
   }>
 }> {
@@ -197,6 +199,14 @@ export interface ChatImageInput {
   mime?: string
 }
 
+export interface ChatFileInput {
+  /** 必填：用于后端按扩展名分发解析器 */
+  name: string
+  /** 纯 base64（不带 data: 前缀） */
+  base64: string
+  mime?: string
+}
+
 export interface ChatStreamRequest {
   message: string
   session_id?: string | null
@@ -204,6 +214,8 @@ export interface ChatStreamRequest {
   max_turns?: number
   history?: null | Array<{ role: string; content: string }>
   images?: ChatImageInput[]
+  /** 非图片附件：pdf / docx / xlsx / pptx / zip / 纯文本/代码 */
+  files?: ChatFileInput[]
   /** 重新生成/编辑重发：保留 stored_history 前 N 条，丢弃其后所有对话 */
   truncate_history_to?: number
 }
