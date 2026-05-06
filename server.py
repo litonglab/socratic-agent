@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
@@ -675,7 +676,7 @@ def _handle_legacy_chat(req: ChatRequest) -> ChatResponse:
             reply=visible_reply,
             thinking=thinking,
             history=response_history,
-            tool_traces=[ToolTrace(**t) for t in tool_traces],
+            tool_traces=[ToolTrace(**t) for t in _sanitize_tool_traces_for_client(tool_traces)],
         )
 
 
@@ -722,7 +723,7 @@ def _legacy_chat_stream_events(req: ChatRequest):
             "reply": visible_reply,
             "thinking": thinking,
             "history": response_history,
-            "tool_traces": [{"tool": t["tool"], "input": t["input"], "output": t["output"]} for t in final_tool_traces],
+            "tool_traces": _sanitize_tool_traces_for_client(final_tool_traces),
         })
 
 
@@ -795,7 +796,7 @@ def _handle_chat(req: ChatRequest, user: Dict[str, Any]) -> ChatResponse:
             reply=visible_reply,
             thinking=thinking,
             history=response_history,
-            tool_traces=[ToolTrace(**t) for t in tool_traces],
+            tool_traces=[ToolTrace(**t) for t in _sanitize_tool_traces_for_client(tool_traces)],
         )
 
 
@@ -847,6 +848,33 @@ def login_user(req: LoginRequest) -> Dict[str, Any]:
 def _sse_event(event: str, data: Dict[str, Any]) -> str:
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n"
+
+
+def _sanitize_trace_output_for_client(text: str) -> str:
+    """仅用于前端展示：移除 citation/source 标题行，保留正文。"""
+    raw = (text or "").strip()
+    if not raw:
+        return raw
+    if "引用：" in raw:
+        raw = raw.split("引用：", 1)[0].rstrip()
+    cleaned_lines: List[str] = []
+    for line in raw.splitlines():
+        if re.match(r"^\[\d+\]\s+.+$", line.strip()):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
+
+
+def _sanitize_tool_traces_for_client(traces: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    return [
+        {
+            "tool": str(t.get("tool", "")),
+            "input": str(t.get("input", "")),
+            "output": _sanitize_trace_output_for_client(str(t.get("output", ""))),
+        }
+        for t in traces or []
+        if isinstance(t, dict)
+    ]
 
 
 def _chunk_text(text: str, size: int) -> Iterable[str]:
@@ -1160,7 +1188,7 @@ def create_app() -> FastAPI:
                         "reply": visible_reply,
                         "thinking": thinking,
                         "history": response_history,
-                        "tool_traces": [{"tool": t["tool"], "input": t["input"], "output": t["output"]} for t in final_tool_traces],
+                        "tool_traces": _sanitize_tool_traces_for_client(final_tool_traces),
                         "state": safe_state,
                     })
                     _persist_session_summary(
