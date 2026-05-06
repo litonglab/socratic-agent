@@ -319,6 +319,33 @@ def _format_citations(citations: List[Dict[str, Any]]) -> str:
     return "引用：\n" + "\n".join(lines)
 
 
+def _strip_citation_headers(context: str) -> str:
+    """去掉 RAG context 中的 [id] source 标题行，仅保留正文。"""
+    if not context:
+        return ""
+    cleaned_blocks: List[str] = []
+    for raw_block in re.split(r"\n\s*\n", context):
+        lines = raw_block.splitlines()
+        if lines and re.match(r"^\[\d+\]\s+.+$", lines[0].strip()):
+            block_text = "\n".join(lines[1:]).strip()
+        else:
+            block_text = raw_block.strip()
+        if block_text:
+            cleaned_blocks.append(block_text)
+    return "\n\n".join(cleaned_blocks).strip()
+
+
+def _build_tool_observation_for_model(observation: Any) -> str:
+    """构造给模型的工具结果文本，避免暴露 citation/source 元数据。"""
+    if isinstance(observation, dict):
+        sanitized = dict(observation)
+        sanitized.pop("citations", None)
+        if isinstance(sanitized.get("context"), str):
+            sanitized["context"] = _strip_citation_headers(sanitized["context"])
+        return _coerce_to_text(sanitized)
+    return _coerce_to_text(observation)
+
+
 def _extract_experiment_id(text: str) -> Optional[str]:
     match = _EXPERIMENT_ID_RE.search(text or "")
     if not match:
@@ -1152,7 +1179,7 @@ def _execute_tool_action(
             next_id += 1
             last_citations.append(merged)
 
-    obs_output_str = _coerce_to_text(observation)
+    obs_output_str = _build_tool_observation_for_model(observation)
     tool_traces.append({
         "tool": action,
         "input": action_input,
@@ -1284,10 +1311,6 @@ def query(
 
     if _find_actions(final_result):
         final_result = "抱歉，我在多轮工具调用后未能生成最终回答，请尝试换一种方式提问。"
-
-    # 追加引用
-    if last_citations and "引用：" not in (final_result or ""):
-        final_result = (final_result or "").rstrip() + "\n\n" + _format_citations(last_citations)
 
     if final_result:
         history.append(HumanMessage(content=question))
@@ -1470,12 +1493,6 @@ def query_stream(
     if _find_actions(final_result):
         final_result = "抱歉，我在多轮工具调用后未能生成最终回答，请尝试换一种方式提问。"
         yield {"type": "token", "content": final_result}
-
-    # 引用
-    if last_citations and "引用：" not in (final_result or ""):
-        citation_text = _format_citations(last_citations)
-        final_result = (final_result or "").rstrip() + "\n\n" + citation_text
-        yield {"type": "token", "content": "\n\n" + citation_text}
 
     if final_result:
         history.append(HumanMessage(content=question))
