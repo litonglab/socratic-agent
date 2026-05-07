@@ -225,7 +225,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     history: Optional[List[Dict[str, str]]] = None
     debug: bool = False
-    max_turns: int = 3
+    max_turns: int = 4
     # 重新生成 / 编辑重发场景：在沿用 stored_history 之前先截断到指定长度（含义：保留前 N 条对话）。
     # None 表示不截断；0 表示清空。仅影响本次 + 持久化；不会改变其他会话。
     truncate_history_to: Optional[int] = None

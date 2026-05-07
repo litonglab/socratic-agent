@@ -3,8 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Tuple
 
-# 兜底：无论格式是否完整，只要 <tool_calls> 出现在可见文本里就整体剔除
-_TOOL_CALLS_STRIP_RE = re.compile(r"<tool_calls>.*", re.IGNORECASE | re.DOTALL)
+# 仅剥离配对的 <tool_calls>...</tool_calls> 块；不吞掉块之后的可见正文。
+# 未闭合的 <tool_calls> 罕见但可能出现（流式截断），此时保留原文，避免静默吞答案。
+_TOOL_CALLS_STRIP_RE = re.compile(r"<tool_calls\b[^>]*>.*?</tool_calls>", re.IGNORECASE | re.DOTALL)
 
 _THINKING_TAGS: Tuple[Tuple[str, str, bool], ...] = (
     ("<思考>", "</思考>", False),
