@@ -273,51 +273,6 @@ topo_store/
     └── manifest.json
 ```
 
-## 构建拓扑增强评测集
-
-如果你希望在评测里更充分体现 Topology RAG 的能力，可以用题库脚本生成“拓扑题占比更高”的数据集：
-
-```bash
-python eval/build_balanced_qa_dataset.py \
-  --topo-ratio 0.45 \
-  --target-size 93 \
-  --min-topo-per-experiment 3 \
-  --output eval/qa_dataset_topo_balanced.json
-```
-
-脚本会合并 `eval/topology_question_bank.json` 并自动打上 `requires_topology` 字段，随后你可以在评测脚本里显式指定数据集路径，例如：
-
-```bash
-python eval/ablation_study.py --dataset eval/qa_dataset_topo_balanced.json
-python eval/performance_benchmark.py --dataset eval/qa_dataset_topo_balanced.json
-python eval/judge_consistency.py --dataset eval/qa_dataset_topo_balanced.json
-python eval/topology_evaluation.py --questions-file eval/topology_question_bank.json
-```
-
-如果你已经补齐了多个实验的 `topo_store/*/approved_json`，建议先扩充拓扑题库，再重建评测集：
-
-```bash
-python eval/expand_topology_question_bank.py \
-  --bank eval/topology_question_bank.json \
-  --output eval/topology_question_bank.json \
-  --max-new-per-topology 4
-```
-
-该脚本会跨实验自动补题（去重并延续 `TQ` 编号），随后可继续执行上面的平衡构建与评测命令。
-其中 `--min-topo-per-experiment` 用于约束每个实验在平衡集里的最低拓扑题数量，能有效避免题目过度集中在单个实验。
-
-如果你想在不重写全量题库的前提下提升评测集质量，可以再执行一次清洗补齐：
-
-```bash
-python eval/curate_qa_dataset_v2.py \
-  --seed-dataset eval/qa_dataset_topo_balanced.json \
-  --output eval/qa_dataset_topo_balanced_v2.json \
-  --report eval/qa_dataset_topo_balanced_v2_report.json \
-  --min-reference-len 20
-```
-
-说明：`--min-reference-len` 越高，题目可判分性越好，但可用拓扑题上限会下降；可结合报告里的 `high_quality_candidate_topology_n` 调整阈值。
-
 ## 目录结构（核心部分）
 
 ```text
