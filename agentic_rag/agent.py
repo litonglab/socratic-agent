@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import re
 import threading
@@ -13,6 +15,19 @@ from dataclasses import dataclass
 from agentic_rag.utils import _coerce_to_text
 from agentic_rag.llm_config import build_chat_llm
 from agentic_rag.chat_format import split_assistant_content, split_visible_and_thinking
+from .prompts import (
+    BASE_PROMPT_LAB,
+    BASE_PROMPT_THEORY,
+    BASE_PROMPT_REVIEW,
+    BASE_PROMPT_CALC,
+    STRATEGY_LAB,
+    STRATEGY_THEORY,
+    STRATEGY_REVIEW,
+    STRATEGY_CALC,
+    UNIFIED_CLASSIFICATION_PROMPT,
+    BASE_PROMPT_GENERAL,
+    LAB4_SPECIALIST_GUIDANCE,
+)
 
 
 # 流式 forward 时需要保护的标签前缀：当 visible 末尾正在形成下列任意标签的开头，
@@ -49,19 +64,7 @@ def _strip_unsafe_tail(text: str) -> str:
             if k < len(tag) and tag_lower.startswith(suffix_lower):
                 return text[:-k]
     return text
-from .prompts import (
-    BASE_PROMPT_LAB,
-    BASE_PROMPT_THEORY,
-    BASE_PROMPT_REVIEW,
-    BASE_PROMPT_CALC,
-    STRATEGY_LAB,
-    STRATEGY_THEORY,
-    STRATEGY_REVIEW,
-    STRATEGY_CALC,
-    UNIFIED_CLASSIFICATION_PROMPT,
-    BASE_PROMPT_GENERAL,
-    LAB4_SPECIALIST_GUIDANCE,
-)
+
 
 # topo_rag 依赖 PIL / python-docx / OpenAI 等组件，延迟导入避免拖慢启动
 _topo_retriever = None
@@ -427,7 +430,9 @@ def _extract_lab_evidence_slots(question: str) -> LabEvidenceSlots:
         slots["output"].append(_truncate_fragment(text, limit=180))
     elif lines:
         for line in lines:
-            if _matches_any_pattern(line, _LAB_OUTPUT_MARKER_PATTERNS) and _matches_any_pattern(line, _LAB_OUTPUT_RESULT_PATTERNS):
+            mo = _matches_any_pattern(line, _LAB_OUTPUT_MARKER_PATTERNS)
+            mr = _matches_any_pattern(line, _LAB_OUTPUT_RESULT_PATTERNS)
+            if mo and mr:
                 slots["output"].append(_truncate_fragment(line, limit=180))
                 break
 
@@ -438,6 +443,170 @@ def _extract_lab_evidence_slots(question: str) -> LabEvidenceSlots:
         slots["action"].append(_truncate_fragment(text))
 
     return slots
+
+
+def _merge_prefetch_rag_citations(
+    last_citations: List[Dict[str, Any]], rag: Dict[str, Any]
+) -> None:
+    """把预检索 RAG 的 citations 并入 last_citations，供引用展示。"""
+    if not rag.get("citations"):
+        return
+    existing = {
+        (c.get("source", "unknown"), c.get("snippet", ""))
+        for c in last_citations
+    }
+    next_id = len(last_citations) + 1
+    for citation in rag.get("citations") or []:
+        key = (citation.get("source", "unknown"), citation.get("snippet", ""))
+        if key in existing:
+            continue
+        existing.add(key)
+        merged = dict(citation)
+        merged["id"] = next_id
+        next_id += 1
+        last_citations.append(merged)
+
+
+def _resolve_category_for_prefetch(ctx: _QueryContext) -> str:
+    if ctx.use_general_llm:
+        return "THEORY_CONCEPT"
+    cat = (ctx.category or "").strip()
+    return cat if cat else "THEORY_CONCEPT"
+
+
+def _prefetch_rag_evidence(
+    question: str,
+    *,
+    ctx: _QueryContext,
+    history: List[BaseMessage],
+    state: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any], bool]:
+    """课程库预检索：返回 traces 片段、原始 RAG 字典、是否命中。"""
+    experiment_id, _ = _resolve_experiment_context(question, history, state)
+    category = _resolve_category_for_prefetch(ctx)
+    if ctx.use_general_llm:
+        hint_level = int(state.get("hint_level", 0) or 0)
+    else:
+        hint_level = int(ctx.hint_level or 0)
+    q = (question or "").strip()
+    rag_query = _augment_lab4_query(q) if experiment_id == "lab4" else q
+    rag = RAGAgent(rag_query, category=category, hint_level=hint_level)
+    if not isinstance(rag, dict):
+        rag = {"ok": False, "error": "unexpected rag payload", "context": ""}
+
+    traces: List[Dict[str, Any]] = []
+    hit = bool(rag.get("ok")) and int(rag.get("source_count") or 0) > 0
+    obs_for_trace = _build_tool_observation_for_model(rag)
+    traces.append(
+        {
+            "tool": "检索",
+            "input": q,
+            "output": (obs_for_trace or "")[:2000],
+        }
+    )
+    return traces, rag, hit
+
+
+_PREFETCH_CTX_CHAR_LIMIT = 8000
+
+
+def _apply_websearch_prefetch_to_context(
+    ctx: _QueryContext,
+    *,
+    question: str,
+    rag: Dict[str, Any],
+    rag_hit: bool,
+    web_text: str,
+) -> None:
+    """注入预检索段落，并从 contextual_actions 移除「检索」「搜索」，避免重复调用。"""
+    rag_ctx_raw = ""
+    if isinstance(rag, dict):
+        if rag.get("context"):
+            rag_ctx_raw = (rag.get("context") or "").strip()
+        elif not rag_hit and rag.get("error"):
+            rag_ctx_raw = f"（检索未完成：{rag.get('error')}）"
+
+    if rag_ctx_raw:
+        rag_display = rag_ctx_raw[:_PREFETCH_CTX_CHAR_LIMIT]
+        if len(rag_ctx_raw) > _PREFETCH_CTX_CHAR_LIMIT:
+            rag_display += "\n…（下文已截断）"
+    else:
+        rag_display = "（本次未检索到与问题直接相关的课程文档片段）"
+
+    if rag_hit:
+        web_display = "（课程库已有命中，已跳过联网搜索。）"
+    else:
+        w = (web_text or "").strip()
+        web_display = w if w else "（联网搜索暂未取得有效摘要。）"
+
+    ctx.contextual_actions.pop("检索", None)
+    ctx.contextual_actions.pop("搜索", None)
+    allowed_tools = ", ".join(ctx.contextual_actions.keys()) if ctx.contextual_actions else "无"
+
+    inject = (
+        "\n\n【系统预检索参考资料】\n"
+        "以下段落由系统在作答前自动完成。**禁止**再调用工具「检索」「搜索」（即使上文工具列表中出现）。\n"
+        f"作答时仍可用的工具仅剩：{allowed_tools}"
+        + ("（若为「无」则不要输出 <tool_calls>）。" if not ctx.contextual_actions else "。")
+        + "\n\n### 课程文档库\n"
+        + rag_display
+        + "\n\n### 联网摘要\n"
+        + web_display
+        + "\n"
+    )
+    ctx.final_prompt += inject
+
+
+def _finalize_websearch_prefetch(
+    prefetch_traces: List[Dict[str, Any]],
+    question: str,
+    ctx: _QueryContext,
+    rag: Dict[str, Any],
+    rag_hit: bool,
+    web_text: str,
+) -> None:
+    prefetch_traces.append(
+        {
+            "tool": "搜索",
+            "input": (question or "").strip(),
+            "output": (web_text or "")[:2000] if not rag_hit else "（课程库已命中，跳过联网搜索）",
+        }
+    )
+    _apply_websearch_prefetch_to_context(
+        ctx,
+        question=question,
+        rag=rag,
+        rag_hit=rag_hit,
+        web_text=web_text,
+    )
+
+
+def _run_enable_websearch_prefetch(
+    question: str,
+    ctx: _QueryContext,
+    history: List[BaseMessage],
+    state: Dict[str, Any],
+    *,
+    last_citations_out: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    启用联网开关时的固定顺序：先 RAG；未命中则调用 WebSearch(question)。
+    返回 (prefetch_tool_traces, web_raw_text)。
+    """
+    prefetch_traces, rag, rag_hit = _prefetch_rag_evidence(
+        question, ctx=ctx, history=history, state=state
+    )
+    web_text = ""
+    if last_citations_out is not None:
+        _merge_prefetch_rag_citations(last_citations_out, rag)
+
+    if not rag_hit:
+        web_text = WebSearch((question or "").strip())
+
+    _finalize_websearch_prefetch(
+        prefetch_traces, question, ctx, rag, rag_hit, web_text
+    )
+    return prefetch_traces, web_text
 
 
 def _merge_lab_evidence_slots(
@@ -457,7 +626,9 @@ def _merge_lab_evidence_slots(
     return merged, updates
 
 
-def _score_lab_evidence(state: Dict[str, Any], question: str) -> Tuple[int, Dict[str, bool], LabEvidenceSlots, Dict[str, bool]]:
+def _score_lab_evidence(
+    state: Dict[str, Any], question: str
+) -> Tuple[int, Dict[str, bool], LabEvidenceSlots, Dict[str, bool]]:
     existing_slots = _load_lab_evidence_slots(state)
     incoming_slots = _extract_lab_evidence_slots(question)
     merged_slots, slot_updates = _merge_lab_evidence_slots(existing_slots, incoming_slots)
@@ -591,7 +762,9 @@ def _apply_hint_state_machine(
 
     if signals.llm_decision == "JUMP_TO_MAX":
         return max_level, False, "llm_jump_to_max"
-    if signals.llm_decision == "INCREASE" and (signals.explicit_confusion or signals.frustration or signals.stagnation_turns >= 2):
+    if signals.llm_decision == "INCREASE" and (
+        signals.explicit_confusion or signals.frustration or signals.stagnation_turns >= 2
+    ):
         return min(current_level + 1, max_level), False, "non_lab_increase"
     if signals.stagnation_turns >= 3 and not signals.short_reply:
         return min(current_level + 1, max_level), True, "non_lab_stagnation_failsafe"
@@ -776,7 +949,12 @@ def _parse_category(raw) -> str:
     return ""
 
 
-_DEFAULT_CLASSIFICATION = {"relevance": True, "category": "LAB_TROUBLESHOOTING", "secondary_categories": [], "hint_decision": "MAINTAIN"}
+_DEFAULT_CLASSIFICATION = {
+    "relevance": True,
+    "category": "LAB_TROUBLESHOOTING",
+    "secondary_categories": [],
+    "hint_decision": "MAINTAIN",
+}
 
 
 def classify_unified(
@@ -1273,18 +1451,25 @@ def query(
         history.append(AIMessage(content=ctx.early_reply))
         return ctx.early_reply, history, [], state
 
+    prefetch_traces: List[Dict[str, Any]] = []
+    prefetch_citations: List[Dict[str, Any]] = []
+    if enable_websearch:
+        prefetch_traces, _ = _run_enable_websearch_prefetch(
+            q, ctx, history, state, last_citations_out=prefetch_citations
+        )
+
     # 无关问题 → 通用 LLM
     if ctx.use_general_llm:
         bot = Agent(ctx.final_prompt, history)
         reply = bot(q)
         history.append(HumanMessage(content=question))
         history.append(AIMessage(content=reply))
-        return reply, history, [], state
+        return reply, history, prefetch_traces, state
 
     # Agent 执行循环
     bot = Agent(ctx.final_prompt, history)
-    tool_traces: List[Dict[str, Any]] = []
-    last_citations: List[Dict[str, Any]] = []
+    tool_traces: List[Dict[str, Any]] = list(prefetch_traces)
+    last_citations: List[Dict[str, Any]] = list(prefetch_citations)
     final_result = ""
     bot.add_user_message(q)
 
@@ -1344,7 +1529,7 @@ def query_stream(
 ):
     """
     流式版 query()。yield 字典：
-      {"type": "stage", "stage": "analyzing|tools|generating", "tools": [..]?}  — 阶段提示
+      {"type": "stage", "stage": "analyzing|websearching|tools|generating", "tools": [..]?}  — 阶段提示
       {"type": "thinking", "content": "..."}                                    — 流式思考增量（<思考> 标签内）
       {"type": "token", "content": "..."}                                       — 流式可见 token
       {"type": "done", "result": str, "history": List, "tool_traces": List, "state": Dict}
@@ -1383,6 +1568,19 @@ def query_stream(
                "tool_traces": [], "state": state}
         return
 
+    prefetch_traces: List[Dict[str, Any]] = []
+    prefetch_citations: List[Dict[str, Any]] = []
+    if enable_websearch:
+        prefetch_traces, rag, rag_hit = _prefetch_rag_evidence(
+            q, ctx=ctx, history=history, state=state
+        )
+        _merge_prefetch_rag_citations(prefetch_citations, rag)
+        web_text = ""
+        if not rag_hit:
+            yield {"type": "stage", "stage": "websearching"}
+            web_text = WebSearch(q)
+        _finalize_websearch_prefetch(prefetch_traces, q, ctx, rag, rag_hit, web_text)
+
     # 无关问题 → 通用 LLM（流式）
     if ctx.use_general_llm:
         bot = Agent(ctx.final_prompt, history)
@@ -1395,16 +1593,19 @@ def query_stream(
                 first_token = False
             final_result += token
             yield {"type": "token", "content": token}
+        if not (final_result or "").strip():
+            final_result = "抱歉，模型本轮未返回任何内容，请稍后重试或检查 API 连通性。"
+            yield {"type": "token", "content": final_result}
         history.append(HumanMessage(content=question))
         history.append(AIMessage(content=final_result))
         yield {"type": "done", "result": final_result, "history": history,
-               "tool_traces": [], "state": state}
+               "tool_traces": prefetch_traces, "state": state}
         return
 
     # Agent 循环（流式）
     bot = Agent(ctx.final_prompt, history)
-    tool_traces: List[Dict[str, Any]] = []
-    last_citations: List[Dict[str, Any]] = []
+    tool_traces: List[Dict[str, Any]] = list(prefetch_traces)
+    last_citations: List[Dict[str, Any]] = list(prefetch_citations)
     final_result = ""
     # 跨轮聚合的"思考过程"——done 时返回前端，确保用户在生成回答后能查看完整思考记录
     aggregated_thinking_segments: List[str] = []

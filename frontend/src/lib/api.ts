@@ -188,6 +188,7 @@ export interface StreamEvent {
   // done
   reply?: string
   thinking?: string
+  ok?: boolean
   tool_traces?: ToolTrace[]
   state?: ChatState
   // error
