@@ -12,7 +12,7 @@ from agentic_rag.web_search import WebSearch
 from dataclasses import dataclass
 from agentic_rag.utils import _coerce_to_text
 from agentic_rag.llm_config import build_chat_llm
-from agentic_rag.chat_format import split_assistant_content
+from agentic_rag.chat_format import split_assistant_content, split_visible_and_thinking
 
 
 # 流式 forward 时需要保护的标签前缀：当 visible 末尾正在形成下列任意标签的开头，
@@ -162,7 +162,12 @@ _LAB_OUTPUT_MARKER_PATTERNS = [
 _LAB_SLOT_KEYS = ("symptom", "output", "topology", "action")
 
 action_re = re.compile(r'^工具：(\w+)：(.*)$')
-tool_calls_block_re = re.compile(r"<tool_calls>\s*(.*?)\s*</tool_calls>", re.IGNORECASE | re.DOTALL)
+# 闭合标签放宽匹配：兼容模型 hallucinate 出 </||DSML||tool_calls> / </tool_calls_v2>
+# 等损坏形式，仍然把它识别为完整的工具调用块，从而让搜索/检索工具能正常被调起。
+tool_calls_block_re = re.compile(
+    r"<tool_calls\b[^>]*>\s*(.*?)\s*</[^<>]*?tool_calls[^<>]*?>",
+    re.IGNORECASE | re.DOTALL,
+)
 _EXPERIMENT_ID_RE = re.compile(r"(?:实验\s*|lab[\s_-]?)(\d+)", re.IGNORECASE)
 _MAX_TOOL_ACTIONS_PER_TURN = 5
 _TOOL_API_NAME_MAP = {
@@ -1310,7 +1315,10 @@ def query(
         bot.add_ai_message(result)
         break
 
-    if _find_actions(final_result):
+    # 兜底：循环耗尽 max_turns 时 final_result 可能为空；或剥离 <tool_calls> 后视觉为空；
+    # 或仍含未消化的 action —— 三种情况均退化为友好提示，避免空白回答。
+    _visible_check, _ = split_visible_and_thinking(final_result)
+    if not _visible_check.strip() or _find_actions(final_result):
         final_result = "抱歉，我在多轮工具调用后未能生成最终回答，请尝试换一种方式提问。"
 
     if final_result:
@@ -1499,7 +1507,10 @@ def query_stream(
         final_result = full_turn_text
         break
 
-    if _find_actions(final_result):
+    # 兜底：循环耗尽 max_turns 时 final_result 可能为空；或剥离 <tool_calls> 后视觉为空；
+    # 或仍含未消化的 action —— 三种情况均退化为友好提示，避免前端空白气泡。
+    _visible_check, _ = split_visible_and_thinking(final_result)
+    if not _visible_check.strip() or _find_actions(final_result):
         final_result = "抱歉，我在多轮工具调用后未能生成最终回答，请尝试换一种方式提问。"
         yield {"type": "token", "content": final_result}
 

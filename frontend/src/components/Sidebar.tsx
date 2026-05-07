@@ -9,6 +9,7 @@ import {
   Pencil,
   X as XIcon,
   Check,
+  Loader2,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
@@ -22,6 +23,10 @@ interface Props {
   user: AuthUser
   sessions: SessionMeta[]
   activeId: string | null
+  /** 哪些 sid 正在流式生成 → 该行右侧显示转圈 */
+  streamingSessions?: ReadonlySet<string>
+  /** 哪些 sid 已完成但用户未查看 → 该行右侧显示红点 */
+  unseenSessions?: ReadonlySet<string>
   onNew: () => void
   onSelect: (id: string) => void
   onDelete: (id: string) => void
@@ -98,6 +103,8 @@ export default function Sidebar(props: Props) {
     user,
     sessions,
     activeId,
+    streamingSessions,
+    unseenSessions,
     onNew,
     onSelect,
     onDelete,
@@ -196,6 +203,8 @@ export default function Sidebar(props: Props) {
                   key={s.session_id}
                   s={s}
                   active={s.session_id === activeId}
+                  streaming={streamingSessions?.has(s.session_id) ?? false}
+                  unseen={unseenSessions?.has(s.session_id) ?? false}
                   renaming={renamingId === s.session_id}
                   onSelect={() => onSelect(s.session_id)}
                   onArchive={() => onArchive(s.session_id)}
@@ -228,6 +237,10 @@ export default function Sidebar(props: Props) {
 interface RowProps {
   s: SessionMeta
   active: boolean
+  /** 该会话正在后台流式生成：右侧显示小转圈 */
+  streaming?: boolean
+  /** 该会话已完成但用户未查看：右侧显示红点 */
+  unseen?: boolean
   renaming: boolean
   onSelect: () => void
   onArchive: () => void
@@ -311,6 +324,8 @@ function RenameInput({
 function SessionRow({
   s,
   active,
+  streaming = false,
+  unseen = false,
   renaming,
   onSelect,
   onArchive,
@@ -350,6 +365,25 @@ function SessionRow({
       >
         {s.title || "新会话"}
       </button>
+      {/* 状态指示：streaming 优先展示转圈；否则若 unseen 显示红点。
+          位置在更多操作按钮之前；hover 时更多按钮会与之并存。 */}
+      {streaming ? (
+        <span
+          className="shrink-0 grid place-items-center w-6 h-6 text-[hsl(var(--primary))]"
+          title="正在生成中…"
+          aria-label="正在生成中"
+        >
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        </span>
+      ) : unseen ? (
+        <span
+          className="shrink-0 grid place-items-center w-6 h-6"
+          title="已完成生成，点击查看"
+          aria-label="未读：已完成生成"
+        >
+          <span className="block w-2 h-2 rounded-full bg-[hsl(var(--primary))]" />
+        </span>
+      ) : null}
       <Popover>
         <PopoverTrigger asChild>
           <button

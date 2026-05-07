@@ -225,7 +225,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     history: Optional[List[Dict[str, str]]] = None
     debug: bool = False
-    max_turns: int = 3
+    max_turns: int = 4
     # 重新生成 / 编辑重发场景：在沿用 stored_history 之前先截断到指定长度（含义：保留前 N 条对话）。
     # None 表示不截断；0 表示清空。仅影响本次 + 持久化；不会改变其他会话。
     truncate_history_to: Optional[int] = None
@@ -804,11 +804,11 @@ def _handle_chat(req: ChatRequest, user: Dict[str, Any]) -> ChatResponse:
 
 def register_user(req: RegisterRequest) -> Dict[str, Any]:
     if not validate_username(req.username):
-        raise HTTPException(status_code=400, detail="invalid username")
+        raise HTTPException(status_code=400, detail="用户名格式不合法")
     if not validate_password(req.password):
-        raise HTTPException(status_code=400, detail="invalid password")
+        raise HTTPException(status_code=400, detail="密码格式不合法")
     if find_user_by_username(req.username):
-        raise HTTPException(status_code=400, detail="username exists")
+        raise HTTPException(status_code=400, detail="用户名已被占用")
 
     salt, password_hash = hash_password(req.password)
     user = {
@@ -837,7 +837,7 @@ def register_user(req: RegisterRequest) -> Dict[str, Any]:
 def login_user(req: LoginRequest) -> Dict[str, Any]:
     user, ok = authenticate_user(req.username, req.password)
     if not ok or not user:
-        raise HTTPException(status_code=401, detail="invalid credentials")
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = issue_token_for_user(user, days=30)
     append_log(user["id"], "login", "password")
     return {"token": token, "user": {"id": user["id"], "username": user["username"], "profile": user["profile"]}}

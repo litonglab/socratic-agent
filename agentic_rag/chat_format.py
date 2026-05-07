@@ -3,8 +3,13 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Tuple
 
-# 兜底：无论格式是否完整，只要 <tool_calls> 出现在可见文本里就整体剔除
-_TOOL_CALLS_STRIP_RE = re.compile(r"<tool_calls>.*", re.IGNORECASE | re.DOTALL)
+# 仅剥离配对的 <tool_calls>...</tool_calls> 块；不吞掉块之后的可见正文。
+# 闭合标签放宽匹配：兼容模型 hallucinate 出 </||DSML||tool_calls> 等损坏形式，
+# 与 agent.py 的 tool_calls_block_re 保持一致，避免"agent 解析得到 / 显示却没剥离"的不一致。
+_TOOL_CALLS_STRIP_RE = re.compile(
+    r"<tool_calls\b[^>]*>.*?</[^<>]*?tool_calls[^<>]*?>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 _THINKING_TAGS: Tuple[Tuple[str, str, bool], ...] = (
     ("<思考>", "</思考>", False),
