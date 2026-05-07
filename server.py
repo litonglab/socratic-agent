@@ -225,7 +225,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     history: Optional[List[Dict[str, str]]] = None
     debug: bool = False
-    max_turns: int = 5
+    max_turns: int = 3
     # 重新生成 / 编辑重发场景：在沿用 stored_history 之前先截断到指定长度（含义：保留前 N 条对话）。
     # None 表示不截断；0 表示清空。仅影响本次 + 持久化；不会改变其他会话。
     truncate_history_to: Optional[int] = None
@@ -707,6 +707,8 @@ def _legacy_chat_stream_events(req: ChatRequest):
         ):
             if event["type"] == "token":
                 yield _sse_event("delta", {"content": event["content"]})
+            elif event["type"] == "ping":
+                yield ": ping\n\n"
             elif event["type"] == "done":
                 final_result = event["result"]
                 final_history = event["history"]
@@ -1108,6 +1110,8 @@ def create_app() -> FastAPI:
                     ):
                         if event["type"] == "token":
                             yield _sse_event("delta", {"content": event["content"]})
+                        elif event["type"] == "ping":
+                            yield ": ping\n\n"
                         elif event["type"] == "thinking":
                             yield _sse_event("thinking_delta", {"content": event["content"]})
                         elif event["type"] == "stage":

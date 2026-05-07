@@ -1,6 +1,7 @@
 import json
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
@@ -1349,11 +1350,19 @@ def query_stream(
         state = {}
 
     # 阶段：意图分析 / 上下文准备
+    # _prepare_context 内含一次同步 LLM 分类调用（约 1–4s），放后台线程执行，
+    # 主生成器每 0.8s yield 一个 ping，保持 SSE 连接不被浏览器/代理超时断开。
     yield {"type": "stage", "stage": "analyzing"}
 
-    ctx = _prepare_context(
-        question, history, state, user_id, enable_websearch, allow_process_explanations, debug
-    )
+    with ThreadPoolExecutor(max_workers=1) as _ctx_pool:
+        _ctx_future = _ctx_pool.submit(
+            _prepare_context,
+            question, history, state, user_id, enable_websearch, allow_process_explanations, debug,
+        )
+        while not _ctx_future.done():
+            time.sleep(0.8)
+            yield {"type": "ping"}
+        ctx = _ctx_future.result()  # 若 _prepare_context 内部抛异常，此处重新抛出
     q = (question or "").strip()
 
     # 快速拦截（身份类）
