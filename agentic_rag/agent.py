@@ -162,7 +162,12 @@ _LAB_OUTPUT_MARKER_PATTERNS = [
 _LAB_SLOT_KEYS = ("symptom", "output", "topology", "action")
 
 action_re = re.compile(r'^工具：(\w+)：(.*)$')
-tool_calls_block_re = re.compile(r"<tool_calls>\s*(.*?)\s*</tool_calls>", re.IGNORECASE | re.DOTALL)
+# 闭合标签放宽匹配：兼容模型 hallucinate 出 </||DSML||tool_calls> / </tool_calls_v2>
+# 等损坏形式，仍然把它识别为完整的工具调用块，从而让搜索/检索工具能正常被调起。
+tool_calls_block_re = re.compile(
+    r"<tool_calls\b[^>]*>\s*(.*?)\s*</[^<>]*?tool_calls[^<>]*?>",
+    re.IGNORECASE | re.DOTALL,
+)
 _EXPERIMENT_ID_RE = re.compile(r"(?:实验\s*|lab[\s_-]?)(\d+)", re.IGNORECASE)
 _MAX_TOOL_ACTIONS_PER_TURN = 5
 _TOOL_API_NAME_MAP = {
