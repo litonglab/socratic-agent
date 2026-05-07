@@ -87,6 +87,33 @@ _LEGACY_SESSION_STATES: Dict[str, Dict[str, Any]] = {}
 _LEGACY_STORE_LOCK = threading.Lock()
 
 
+def _visible_and_thinking_for_client(
+    raw_assistant: str,
+    *,
+    stream_thinking_aggregate: str = "",
+) -> Tuple[str, str]:
+    """
+    拆分可见正文与 <思考>/<thinking>；合并流式阶段聚合的思考文本。
+    若正文为空但仍有思考内容，则将思考提升为正文，避免前端主气泡一片空白。
+    """
+    visible_reply, thinking = split_visible_and_thinking(raw_assistant or "")
+    agg = (stream_thinking_aggregate or "").strip()
+    if agg:
+        if thinking and agg not in thinking:
+            thinking = (agg + "\n\n" + thinking).strip()
+        elif not thinking:
+            thinking = agg
+    visible_reply = (visible_reply or "").strip()
+    thinking = (thinking or "").strip()
+    if not visible_reply and thinking:
+        visible_reply, thinking = thinking, ""
+    if not visible_reply and not thinking:
+        visible_reply = (
+            "抱歉，本轮未生成可见回答，请稍后重试或检查模型 API 是否正常。"
+        )
+    return visible_reply, thinking
+
+
 def _anonymize_session_id(session_id: str) -> str:
     raw = (session_id or "").strip()
     if not raw:
@@ -666,7 +693,7 @@ def _handle_legacy_chat(req: ChatRequest) -> ChatResponse:
             allow_process_explanations=req.allow_process_explanations,
         )
 
-        visible_reply, thinking = split_visible_and_thinking(raw_reply)
+        visible_reply, thinking = _visible_and_thinking_for_client(raw_reply)
         response_history = _sanitize_history_dicts(messages_to_dicts(new_history_msgs))
         _persist_legacy_session(session_id, response_history, new_state or {})
 
@@ -691,6 +718,7 @@ def _legacy_chat_stream_events(req: ChatRequest):
         yield _sse_event("meta", {"session_id": session_id, "message_id": message_id})
 
         final_result = ""
+        final_thinking_full = ""
         final_history = history_msgs
         final_tool_traces: List[Dict[str, Any]] = []
         final_state = state_dict or {}
@@ -711,11 +739,15 @@ def _legacy_chat_stream_events(req: ChatRequest):
                 yield ": ping\n\n"
             elif event["type"] == "done":
                 final_result = event["result"]
+                final_thinking_full = event.get("thinking_full") or ""
                 final_history = event["history"]
                 final_tool_traces = event["tool_traces"]
                 final_state = event["state"]
 
-        visible_reply, thinking = split_visible_and_thinking(final_result)
+        visible_reply, thinking = _visible_and_thinking_for_client(
+            final_result,
+            stream_thinking_aggregate=final_thinking_full,
+        )
         response_history = _sanitize_history_dicts(messages_to_dicts(final_history))
         _persist_legacy_session(session_id, response_history, final_state or {})
 
@@ -755,7 +787,7 @@ def _handle_chat(req: ChatRequest, user: Dict[str, Any]) -> ChatResponse:
             allow_process_explanations=req.allow_process_explanations,
         )
 
-        visible_reply, thinking = split_visible_and_thinking(raw_reply)
+        visible_reply, thinking = _visible_and_thinking_for_client(raw_reply)
         full_history, last_turns, session_title, session_archived = _build_session_history_records(
             session_snapshot,
             req.history,
@@ -865,6 +897,31 @@ def _sanitize_trace_output_for_client(text: str) -> str:
             continue
         cleaned_lines.append(line)
     return "\n".join(cleaned_lines).strip()
+
+
+def _attachment_meta_from_request(req: ChatRequest) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """从 ChatRequest 提取用户图片缩略图与附件元数据，用于入库与错误路径复用。"""
+    user_image_thumbs: List[str] = []
+    if req.images:
+        for img in req.images:
+            if not img or not img.base64:
+                continue
+            thumb = _make_image_thumbnail_b64(img.base64)
+            if thumb:
+                user_image_thumbs.append(thumb)
+    user_files_meta: List[Dict[str, Any]] = []
+    if req.files:
+        for f in req.files:
+            if not f or not f.name:
+                continue
+            meta: Dict[str, Any] = {"name": f.name}
+            if f.base64:
+                try:
+                    meta["size"] = max(0, (len(f.base64) * 3) // 4)
+                except Exception:
+                    pass
+            user_files_meta.append(meta)
+    return user_image_thumbs, user_files_meta
 
 
 def _sanitize_tool_traces_for_client(traces: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -1093,133 +1150,173 @@ def create_app() -> FastAPI:
 
                     yield _sse_event("meta", {"session_id": sid, "message_id": message_id})
 
-                    final_result = ""
-                    final_tool_traces: list = []
-                    final_state = state_dict or {}
-                    final_thinking_full = ""
-
-                    for event in query_stream(
-                        enriched_message,
-                        history=history_msgs,
-                        max_turns=req.max_turns,
-                        debug=req.debug,
-                        state=state_dict,
-                        user_id=user_id,
-                        enable_websearch=req.enable_websearch,
-                        allow_process_explanations=req.allow_process_explanations,
-                    ):
-                        if event["type"] == "token":
-                            yield _sse_event("delta", {"content": event["content"]})
-                        elif event["type"] == "ping":
-                            yield ": ping\n\n"
-                        elif event["type"] == "thinking":
-                            yield _sse_event("thinking_delta", {"content": event["content"]})
-                        elif event["type"] == "stage":
-                            stage_payload = {"stage": event.get("stage", "")}
-                            if event.get("tools"):
-                                stage_payload["tools"] = list(event["tools"])
-                            yield _sse_event("stage", stage_payload)
-                        elif event["type"] == "done":
-                            final_result = event["result"]
-                            final_tool_traces = event["tool_traces"]
-                            final_state = event["state"]
-                            trace_state = final_state or {}
-                            final_thinking_full = event.get("thinking_full") or ""
-
-                    visible_reply, thinking = split_visible_and_thinking(final_result)
-                    # 把跨轮聚合的思考与最后一轮模型自带的 <思考> 合并：
-                    # 用换行分隔，避免覆盖某一边的内容。
-                    if final_thinking_full:
-                        if thinking and final_thinking_full not in thinking:
-                            thinking = (final_thinking_full + "\n\n" + thinking).strip()
-                        elif not thinking:
-                            thinking = final_thinking_full
-                    # 持久化用原始用户输入；附件抽取出来的长文本不入库
-                    # 但 user 消息上的"附件元信息"要写进 stored_history，
-                    # 让重新打开会话时仍能看到当时的图片缩略图与文件名 chip。
                     user_image_thumbs: List[str] = []
-                    if req.images:
-                        for img in req.images:
-                            if not img or not img.base64:
-                                continue
-                            thumb = _make_image_thumbnail_b64(img.base64)
-                            if thumb:
-                                user_image_thumbs.append(thumb)
                     user_files_meta: List[Dict[str, Any]] = []
-                    if req.files:
-                        for f in req.files:
-                            if not f or not f.name:
-                                continue
-                            meta: Dict[str, Any] = {"name": f.name}
-                            if f.base64:
-                                # 仅用 base64 长度估算原始字节数（base64 长度 * 3/4），不存原文
-                                try:
-                                    meta["size"] = max(0, (len(f.base64) * 3) // 4)
-                                except Exception:
-                                    pass
-                            user_files_meta.append(meta)
-                    full_history, last_turns, session_title, session_archived = _build_session_history_records(
-                        session_snapshot,
-                        req.history,
-                        original_user_message,
-                        visible_reply,
-                        thinking,
-                        message_id,
-                        final_tool_traces,
-                        user_image_b64=user_image_thumbs or None,
-                        user_files=user_files_meta or None,
-                    )
-                    response_history, _ = _finalize_history(full_history)
-                    persisted_updated_at = _persist_session_snapshot(
-                        summary=summary,
-                        user_id=user_id,
-                        session_id=sid,
-                        full_history=full_history,
-                        last_turns=last_turns,
-                        state=final_state or {},
-                        title=session_title,
-                        archived=session_archived,
-                    )
-                    # 暴露 hint_level / category 等教学元信息给前端，用于渲染层级 chip
-                    safe_state: Dict[str, Any] = {}
-                    if isinstance(final_state, dict):
-                        for key in ("hint_level", "question_category", "category"):
-                            if key in final_state:
-                                safe_state[key] = final_state[key]
-                    yield _sse_event("done", {
-                        "session_id": sid,
-                        "message_id": message_id,
-                        "reply": visible_reply,
-                        "thinking": thinking,
-                        "history": response_history,
-                        "tool_traces": _sanitize_tool_traces_for_client(final_tool_traces),
-                        "state": safe_state,
-                    })
-                    _persist_session_summary(
-                        prev_summary=summary,
-                        user_msg=original_user_message,
-                        assistant_msg=visible_reply,
-                        user_id=user_id,
-                        session_id=sid,
-                        persisted_updated_at=persisted_updated_at,
-                    )
-                    _persist_chat_async(
-                        assistant_msg=visible_reply,
-                        user_id=user_id,
-                        session_id=sid,
-                        state=final_state or {},
-                        traces=final_tool_traces,
-                    )
-                    _append_classroom_eval_light_log(
-                        user_id=trace_user_id,
-                        session_id=trace_sid,
-                        latency_ms=int((time.perf_counter() - stream_started_at) * 1000),
-                        status="ok",
-                        sse_completed=True,
-                        input_chars=len(original_user_message or ""),
-                        state=trace_state,
-                        question=original_user_message,
-                    )
+                    try:
+                        user_image_thumbs, user_files_meta = _attachment_meta_from_request(req)
+
+                        final_result = ""
+                        final_tool_traces: list = []
+                        final_state = state_dict or {}
+                        final_thinking_full = ""
+
+                        for event in query_stream(
+                            enriched_message,
+                            history=history_msgs,
+                            max_turns=req.max_turns,
+                            debug=req.debug,
+                            state=state_dict,
+                            user_id=user_id,
+                            enable_websearch=req.enable_websearch,
+                            allow_process_explanations=req.allow_process_explanations,
+                        ):
+                            if event["type"] == "token":
+                                yield _sse_event("delta", {"content": event["content"]})
+                            elif event["type"] == "ping":
+                                yield ": ping\n\n"
+                            elif event["type"] == "thinking":
+                                yield _sse_event("thinking_delta", {"content": event["content"]})
+                            elif event["type"] == "stage":
+                                stage_payload = {"stage": event.get("stage", "")}
+                                if event.get("tools"):
+                                    stage_payload["tools"] = list(event["tools"])
+                                yield _sse_event("stage", stage_payload)
+                            elif event["type"] == "done":
+                                final_result = event["result"]
+                                final_tool_traces = event["tool_traces"]
+                                final_state = event["state"]
+                                trace_state = final_state or {}
+                                final_thinking_full = event.get("thinking_full") or ""
+
+                        visible_reply, thinking = _visible_and_thinking_for_client(
+                            final_result,
+                            stream_thinking_aggregate=final_thinking_full,
+                        )
+                        full_history, last_turns, session_title, session_archived = _build_session_history_records(
+                            session_snapshot,
+                            req.history,
+                            original_user_message,
+                            visible_reply,
+                            thinking,
+                            message_id,
+                            final_tool_traces,
+                            user_image_b64=user_image_thumbs or None,
+                            user_files=user_files_meta or None,
+                        )
+                        response_history, _ = _finalize_history(full_history)
+                        persisted_updated_at = _persist_session_snapshot(
+                            summary=summary,
+                            user_id=user_id,
+                            session_id=sid,
+                            full_history=full_history,
+                            last_turns=last_turns,
+                            state=final_state or {},
+                            title=session_title,
+                            archived=session_archived,
+                        )
+                        safe_state: Dict[str, Any] = {}
+                        if isinstance(final_state, dict):
+                            for key in ("hint_level", "question_category", "category"):
+                                if key in final_state:
+                                    safe_state[key] = final_state[key]
+                        yield _sse_event("done", {
+                            "session_id": sid,
+                            "message_id": message_id,
+                            "reply": visible_reply,
+                            "thinking": thinking,
+                            "history": response_history,
+                            "tool_traces": _sanitize_tool_traces_for_client(final_tool_traces),
+                            "state": safe_state,
+                        })
+                        _persist_session_summary(
+                            prev_summary=summary,
+                            user_msg=original_user_message,
+                            assistant_msg=visible_reply,
+                            user_id=user_id,
+                            session_id=sid,
+                            persisted_updated_at=persisted_updated_at,
+                        )
+                        _persist_chat_async(
+                            assistant_msg=visible_reply,
+                            user_id=user_id,
+                            session_id=sid,
+                            state=final_state or {},
+                            traces=final_tool_traces,
+                        )
+                        _append_classroom_eval_light_log(
+                            user_id=trace_user_id,
+                            session_id=trace_sid,
+                            latency_ms=int((time.perf_counter() - stream_started_at) * 1000),
+                            status="ok",
+                            sse_completed=True,
+                            input_chars=len(original_user_message or ""),
+                            state=trace_state,
+                            question=original_user_message,
+                        )
+                    except Exception as inner_exc:
+                        print(f"[chat_stream] stream/persist failed: {inner_exc!r}")
+                        apology_raw = f"生成失败：{inner_exc}"
+                        apology_vis, apology_thinking = _visible_and_thinking_for_client(apology_raw)
+                        persisted_updated_at = ""
+                        response_history_err = _sanitize_history_dicts(
+                            session_snapshot.get("history", []) or []
+                        )
+                        try:
+                            fh, lt, stitle, sarc = _build_session_history_records(
+                                session_snapshot,
+                                req.history,
+                                original_user_message,
+                                apology_vis,
+                                apology_thinking,
+                                message_id,
+                                [],
+                                user_image_b64=user_image_thumbs or None,
+                                user_files=user_files_meta or None,
+                            )
+                            response_history_err, _ = _finalize_history(fh)
+                            persisted_updated_at = _persist_session_snapshot(
+                                summary=summary,
+                                user_id=user_id,
+                                session_id=sid,
+                                full_history=fh,
+                                last_turns=lt,
+                                state={},
+                                title=stitle,
+                                archived=sarc,
+                            )
+                        except Exception as persist_exc:
+                            print(f"[chat_stream] error-path persist failed: {persist_exc!r}")
+                        yield _sse_event("done", {
+                            "session_id": sid,
+                            "message_id": message_id,
+                            "reply": apology_vis,
+                            "thinking": apology_thinking,
+                            "history": response_history_err,
+                            "tool_traces": [],
+                            "state": {},
+                        })
+                        try:
+                            if persisted_updated_at:
+                                _persist_session_summary(
+                                    prev_summary=summary,
+                                    user_msg=original_user_message,
+                                    assistant_msg=apology_vis,
+                                    user_id=user_id,
+                                    session_id=sid,
+                                    persisted_updated_at=persisted_updated_at,
+                                )
+                        except Exception:
+                            pass
+                        _append_classroom_eval_light_log(
+                            user_id=trace_user_id,
+                            session_id=trace_sid,
+                            latency_ms=int((time.perf_counter() - stream_started_at) * 1000),
+                            status="error",
+                            sse_completed=True,
+                            input_chars=len(original_user_message or ""),
+                            state={},
+                            question=original_user_message,
+                        )
             except Exception as exc:
                 _append_classroom_eval_light_log(
                     user_id=trace_user_id,
@@ -1232,7 +1329,6 @@ def create_app() -> FastAPI:
                     question=original_user_message,
                 )
                 yield _sse_event("error", {"detail": str(exc)})
-                yield _sse_event("done", {"ok": False})
             finally:
                 _release_chat_slot()
 

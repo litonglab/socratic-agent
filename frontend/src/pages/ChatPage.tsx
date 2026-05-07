@@ -308,8 +308,8 @@ export default function ChatPage({ auth }: Props) {
   }
 
   /**
-   * 重新生成：找到该 assistant 消息对应的上一条 user 消息，
-   * 截断 stored_history 到 user 之前，再用同样的 user message 重发。
+   * 重新生成：截断服务端历史到最后一条对应的 user（不含旧 assistant），
+   * **不追加第二条用户气泡**，只在原位置上用 pending assistant 重流式生成。
    */
   async function handleRegenerate(assistantMessageId: string) {
     if (streaming) return
@@ -330,8 +330,8 @@ export default function ChatPage({ auth }: Props) {
     }
     if (userIdx < 0) return
     const userMsg = messages[userIdx]
-    setMessages(messages.slice(0, userIdx))
-    await send(userMsg.content || "", [], { truncateTo: userIdx })
+    const prefix = messages.slice(0, assistantIdx)
+    await send(userMsg.content || "", [], { truncateTo: userIdx, messagePrefix: prefix })
   }
 
   /**
@@ -366,15 +366,16 @@ export default function ChatPage({ auth }: Props) {
   async function send(
     text: string,
     attachments: Attachment[],
-    opts: { truncateTo?: number } = {},
+    opts: { truncateTo?: number; messagePrefix?: ChatMessage[] } = {},
   ) {
     // 多会话并发：以"该 sid 是否正在跑"为准，不再用全局 streaming 拦截。
     const initialActiveId = activeIdRef.current
-    // 草稿状态发首条消息时使用占位 sid；收到 meta 后会通过 realSid 切换到真实 sid。
+    // 草稿状态发首条消息时使用占位 sid；收到 meta 后会通过 runtime 切换到真实 sid。
     const sid = initialActiveId ?? makeDraftId()
     const existingRt = runtimeRef.current.get(sid)
     if (existingRt?.streaming) return
 
+    const usePrefixOnly = opts.messagePrefix !== undefined
     const imageAttachments = attachments.filter((a) => a.kind === "image")
     const fileAttachments = attachments.filter((a) => a.kind === "file")
     const userMsg: ChatMessage = {
@@ -387,14 +388,26 @@ export default function ChatPage({ auth }: Props) {
         ? fileAttachments.map((f) => ({ name: f.name, size: f.size }))
         : undefined,
     }
-    const assistantPending: ChatMessage = { role: "assistant", content: "", pending: true }
+    const assistantPending: ChatMessage = {
+      role: "assistant",
+      content: "",
+      pending: true,
+      streaming_thinking: undefined,
+      thinking_started_at: undefined,
+      thinking_duration_ms: undefined,
+      stage: undefined,
+      stage_tools: undefined,
+    }
 
     // baseMessages：该 sid 的历史 messages（active 状态用 messages state；草稿则用空数组）
-    const baseMessages =
-      initialActiveId === sid
+    const baseMessages = usePrefixOnly
+      ? (opts.messagePrefix ?? [])
+      : initialActiveId === sid
         ? messages
         : runtimeRef.current.get(sid)?.messages ?? []
-    const newMessages = [...baseMessages, userMsg, assistantPending]
+    const newMessages = usePrefixOnly
+      ? [...baseMessages, assistantPending]
+      : [...baseMessages, userMsg, assistantPending]
 
     const ctrl = new AbortController()
     runtimeRef.current.set(sid, {
@@ -546,8 +559,16 @@ export default function ChatPage({ auth }: Props) {
             return next
           })
         } else if (ev.type === "done") {
-          const finalReply = ev.reply || bufVisible
-          respThinking = ev.thinking || ""
+          if (ev.ok === false && !(ev.reply || "").trim() && !(ev.thinking || "").trim()) {
+            continue
+          }
+          const replyTrim = (ev.reply || "").trim()
+          const thinkingTrim = (ev.thinking || "").trim()
+          const bufTrim = bufVisible.trim()
+          const finalReply = replyTrim || bufTrim || thinkingTrim
+          const usedThinkingAsBody =
+            !replyTrim && !bufTrim && Boolean(thinkingTrim)
+          respThinking = usedThinkingAsBody ? "" : ev.thinking || ""
           updateMessages((prev) => {
             const next = [...prev]
             const last = next[next.length - 1]
