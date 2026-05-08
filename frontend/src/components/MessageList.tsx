@@ -285,6 +285,10 @@ const STAGE_META: Record<string, { icon: React.ReactNode; label: string }> = {
     icon: <Sparkles className="w-3.5 h-3.5" />,
     label: "分析问题中…",
   },
+  websearching: {
+    icon: <Globe className="w-3.5 h-3.5 animate-pulse" />,
+    label: "正在联网搜索中…",
+  },
   tools: {
     icon: <Wrench className="w-3.5 h-3.5" />,
     label: "调用工具中…",

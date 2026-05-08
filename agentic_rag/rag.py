@@ -20,6 +20,45 @@ from langchain_classic.retrievers.document_compressors import CrossEncoderRerank
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 
+# SentenceTransformers Hub ID 常见 `组织/模型` 前缀；不匹配时才按「仓库内相对路径」解析
+_EMBEDDING_KNOWN_HUB_PREFIXES = (
+    "BAAI/",
+    "sentence-transformers/",
+    "intfloat/",
+    "hkunlp/",
+    "thenlper/",
+    "microsoft/",
+    "mistralai/",
+)
+
+
+def _resolve_embedding_model_name(raw: Optional[str]) -> str:
+    """相对路径相对仓库根目录；本地路径不存在时回退 BAAI/bge-m3。"""
+    default_hub = "BAAI/bge-m3"
+    name = (raw or default_hub).strip() or default_hub
+
+    def _warn_fallback(missing: Path) -> str:
+        print(
+            f"[RAG] 警告: 配置的本地 Embedding 路径不存在 ({missing})，"
+            f"改用 Hub 模型 {default_hub}（首次需联网下载或使用 HF 镜像）。"
+        )
+        return default_hub
+
+    if name.startswith(("./", ".\\")):
+        rel = name[2:].lstrip("/\\")
+        candidate = (BASE_DIR / rel).resolve()
+        return str(candidate) if candidate.exists() else _warn_fallback(candidate)
+
+    path_probe = Path(name)
+    if path_probe.is_absolute():
+        return str(path_probe) if path_probe.exists() else _warn_fallback(path_probe)
+
+    if "/" in name and not any(name.startswith(pref) for pref in _EMBEDDING_KNOWN_HUB_PREFIXES):
+        candidate = (BASE_DIR / name).resolve()
+        return str(candidate) if candidate.exists() else _warn_fallback(candidate)
+
+    return name
+
 
 def _resolve_index_dir() -> Path:
     index_env = os.getenv("RAG_INDEX_DIR")
@@ -46,12 +85,12 @@ def _resolve_runtime_config() -> Dict[str, Any]:
     return {
         "index_dir": _resolve_index_dir(),
         "rebuild_index": os.getenv("RAG_REBUILD_INDEX", "0").lower() in {"1", "true", "yes"},
-        "embedding_model_name": _resolve_model_name("EMBEDDING_MODEL_NAME", "bge-m3", "BAAI/bge-m3"),
+        "embedding_model_name": _resolve_embedding_model_name(os.getenv("EMBEDDING_MODEL_NAME")),
         "reranker_model_name": _resolve_model_name(
-            "RERANKER_MODEL_NAME",
-            "bge-reranker-v2-m3",
-            "BAAI/bge-reranker-v2-m3",
-        ),
+        "RERANKER_MODEL_NAME",
+        "bge-reranker-v2-m3",
+        "BAAI/bge-reranker-v2-m3",
+),
         "disable_reranker": os.getenv("DISABLE_RERANKER", "0").lower() in {"1", "true", "yes"},
     }
 

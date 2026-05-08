@@ -22,6 +22,22 @@ import { cn } from "@/lib/utils"
 
 const SIDEBAR_KEY = "netruc_sidebar_open"
 
+/**
+ * 单个会话的运行时状态。每个 sid 一份，独立持有自己的 messages、streaming
+ * 标志和 AbortController；切换会话时不再清空这份状态，从而支持后台多会话并发。
+ */
+type SessionRuntime = {
+  messages: ChatMessage[]
+  streaming: boolean
+  abort: AbortController | null
+}
+
+// 草稿会话占位 sid：用户尚未发出第一条消息、还没拿到后端 session_id 时使用。
+// 收到首个 meta 事件后会被 swap 成真实 sid。
+function makeDraftId(): string {
+  return `__draft_${Math.random().toString(36).slice(2, 10)}__`
+}
+
 function readSidebarOpen(): boolean {
   if (typeof window === "undefined") return true
   const v = window.localStorage.getItem(SIDEBAR_KEY)
@@ -40,27 +56,47 @@ export default function ChatPage({ auth }: Props) {
   const navigate = useNavigate()
   const [sessions, setSessions] = useState<SessionMeta[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
+  // 当前活跃会话的 messages 投影；runtimeRef 才是 source of truth。
   const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [streaming, setStreaming] = useState(false)
   const [messagesLoading, setMessagesLoading] = useState(false)
+  // 哪些 sid 正在流式生成 → Sidebar 渲染右侧转圈。
+  const [streamingSet, setStreamingSet] = useState<Set<string>>(() => new Set())
+  // 哪些 sid 在用户离开期间完成了生成、尚未被查看 → Sidebar 红点提示。
+  const [unseenSet, setUnseenSet] = useState<Set<string>>(() => new Set())
   const [websearch, setWebsearch] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(readSidebarOpen)
-  // 流式请求的 AbortController：切换会话 / 卸载 / 用户主动停止时取消
-  const abortRef = useRef<AbortController | null>(null)
+  // 各 sid 的运行时状态（messages / streaming / abort），跨切换不丢失。
+  const runtimeRef = useRef<Map<string, SessionRuntime>>(new Map())
+  // activeId 的同步 ref：异步 SSE 回调里读取最新值，避免闭包陈旧。
+  const activeIdRef = useRef<string | null>(null)
   // 侧栏搜索框 ref：用于 Cmd/Ctrl+K 聚焦
   const sidebarSearchRef = useRef<HTMLInputElement | null>(null)
 
-  const cancelStream = useCallback(() => {
-    if (abortRef.current) {
-      abortRef.current.abort()
-      abortRef.current = null
+  // 当前 active 会话是否在 streaming（衍生量）：决定 ChatInput 的 disabled / Stop 按钮。
+  const streaming = activeId !== null && streamingSet.has(activeId)
+
+  // 仅停掉当前 active 会话的流；其他后台跑的会话不受影响。
+  const cancelActiveStream = useCallback(() => {
+    const sid = activeIdRef.current
+    if (!sid) return
+    const rt = runtimeRef.current.get(sid)
+    if (rt?.abort) {
+      rt.abort.abort()
+      rt.abort = null
     }
   }, [])
 
   useEffect(() => {
+    activeIdRef.current = activeId
+  }, [activeId])
+
+  useEffect(() => {
+    const runtime = runtimeRef.current
     return () => {
-      // 组件卸载时也取消，避免悬挂请求
-      if (abortRef.current) abortRef.current.abort()
+      // 组件卸载：取消所有还在跑的会话流，避免悬挂请求。
+      runtime.forEach((rt) => {
+        if (rt.abort) rt.abort.abort()
+      })
     }
   }, [])
 
@@ -108,27 +144,46 @@ export default function ChatPage({ auth }: Props) {
     }
   }, [auth.user])
 
+  // 切换会话：不再 cancelStream，旧会话保留在 runtimeRef 里继续后台跑。
   async function selectSession(id: string) {
     if (id === activeId) return
-    // 切换会话时先取消正在进行的流式请求，避免新会话被旧 stream 写脏
-    cancelStream()
-    setStreaming(false)
+    // 把当前 active 的 messages 状态写回 ref，免得切回时丢失最近增量。
+    if (activeId) {
+      const rt = runtimeRef.current.get(activeId)
+      if (rt) rt.messages = messages
+    }
     setActiveId(id)
+    activeIdRef.current = id
+    // 进入该会话时清 unseen 红点
+    setUnseenSet((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+    // 切到内存中已有 runtime 的会话：直接投影，不重新拉历史。
+    const cached = runtimeRef.current.get(id)
+    if (cached) {
+      setMessages(cached.messages)
+      setMessagesLoading(false)
+      return
+    }
     setMessagesLoading(true)
     try {
       const data = await fetchSessionMessages(id)
-      setMessages(
-        (data.messages || []).map((m) => ({
-          role: m.role === "user" ? "user" : "assistant",
-          content: m.content || "",
-          thinking: m.thinking || undefined,
-          message_id: m.message_id ?? null,
-          feedback: (m.feedback as FeedbackValue) ?? null,
-          // 后端持久化的是压缩后的 JPEG 缩略图；浏览器对 dataUrl mime 不严格但仍写正确值
-          images: m.image_b64?.map((b) => `data:image/jpeg;base64,${b}`),
-          files: m.files,
-        })),
-      )
+      const msgs: ChatMessage[] = (data.messages || []).map((m) => ({
+        role: m.role === "user" ? "user" : "assistant",
+        content: m.content || "",
+        thinking: m.thinking || undefined,
+        message_id: m.message_id ?? null,
+        feedback: (m.feedback as FeedbackValue) ?? null,
+        // 后端持久化的是压缩后的 JPEG 缩略图；浏览器对 dataUrl mime 不严格但仍写正确值
+        images: m.image_b64?.map((b) => `data:image/jpeg;base64,${b}`),
+        files: m.files,
+      }))
+      setMessages(msgs)
+      // 同步进 ref：保证后续切走再回来仍能保留视图
+      runtimeRef.current.set(id, { messages: msgs, streaming: false, abort: null })
     } catch (e) {
       console.warn("[ChatPage] fetchSessionMessages failed:", e)
       setMessages([])
@@ -137,12 +192,17 @@ export default function ChatPage({ auth }: Props) {
     }
   }
 
+  // 新建会话：保留所有后台跑的会话不动，仅把当前 active 的 messages 写回 ref。
   const newSession = useCallback(() => {
-    cancelStream()
-    setStreaming(false)
+    const cur = activeIdRef.current
+    if (cur) {
+      const rt = runtimeRef.current.get(cur)
+      if (rt) rt.messages = messages
+    }
     setActiveId(null)
+    activeIdRef.current = null
     setMessages([])
-  }, [cancelStream])
+  }, [messages])
 
   // 全局快捷键：
   //  - Cmd/Ctrl+B    折叠/展开侧栏
@@ -186,8 +246,25 @@ export default function ChatPage({ auth }: Props) {
       console.warn("[ChatPage] delete failed:", e)
       toast.error(`删除失败：${(e as Error).message}`)
     }
+    // 同时停掉该会话还在跑的流（如有），并清理 runtime / 标志位缓存
+    const rt = runtimeRef.current.get(id)
+    if (rt?.abort) rt.abort.abort()
+    runtimeRef.current.delete(id)
+    setStreamingSet((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+    setUnseenSet((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
     if (id === activeId) {
       setActiveId(null)
+      activeIdRef.current = null
       setMessages([])
     }
     void reloadSessions()
@@ -231,8 +308,8 @@ export default function ChatPage({ auth }: Props) {
   }
 
   /**
-   * 重新生成：找到该 assistant 消息对应的上一条 user 消息，
-   * 截断 stored_history 到 user 之前，再用同样的 user message 重发。
+   * 重新生成：截断服务端历史到最后一条对应的 user（不含旧 assistant），
+   * **不追加第二条用户气泡**，只在原位置上用 pending assistant 重流式生成。
    */
   async function handleRegenerate(assistantMessageId: string) {
     if (streaming) return
@@ -253,8 +330,8 @@ export default function ChatPage({ auth }: Props) {
     }
     if (userIdx < 0) return
     const userMsg = messages[userIdx]
-    setMessages(messages.slice(0, userIdx))
-    await send(userMsg.content || "", [], { truncateTo: userIdx })
+    const prefix = messages.slice(0, assistantIdx)
+    await send(userMsg.content || "", [], { truncateTo: userIdx, messagePrefix: prefix })
   }
 
   /**
@@ -289,9 +366,16 @@ export default function ChatPage({ auth }: Props) {
   async function send(
     text: string,
     attachments: Attachment[],
-    opts: { truncateTo?: number } = {},
+    opts: { truncateTo?: number; messagePrefix?: ChatMessage[] } = {},
   ) {
-    if (streaming) return
+    // 多会话并发：以"该 sid 是否正在跑"为准，不再用全局 streaming 拦截。
+    const initialActiveId = activeIdRef.current
+    // 草稿状态发首条消息时使用占位 sid；收到 meta 后会通过 runtime 切换到真实 sid。
+    const sid = initialActiveId ?? makeDraftId()
+    const existingRt = runtimeRef.current.get(sid)
+    if (existingRt?.streaming) return
+
+    const usePrefixOnly = opts.messagePrefix !== undefined
     const imageAttachments = attachments.filter((a) => a.kind === "image")
     const fileAttachments = attachments.filter((a) => a.kind === "file")
     const userMsg: ChatMessage = {
@@ -304,22 +388,70 @@ export default function ChatPage({ auth }: Props) {
         ? fileAttachments.map((f) => ({ name: f.name, size: f.size }))
         : undefined,
     }
-    const assistantPending: ChatMessage = { role: "assistant", content: "", pending: true }
-    setMessages((prev) => [...prev, userMsg, assistantPending])
-    setStreaming(true)
+    const assistantPending: ChatMessage = {
+      role: "assistant",
+      content: "",
+      pending: true,
+      streaming_thinking: undefined,
+      thinking_started_at: undefined,
+      thinking_duration_ms: undefined,
+      stage: undefined,
+      stage_tools: undefined,
+    }
+
+    // baseMessages：该 sid 的历史 messages（active 状态用 messages state；草稿则用空数组）
+    const baseMessages = usePrefixOnly
+      ? (opts.messagePrefix ?? [])
+      : initialActiveId === sid
+        ? messages
+        : runtimeRef.current.get(sid)?.messages ?? []
+    const newMessages = usePrefixOnly
+      ? [...baseMessages, assistantPending]
+      : [...baseMessages, userMsg, assistantPending]
 
     const ctrl = new AbortController()
-    abortRef.current = ctrl
+    runtimeRef.current.set(sid, {
+      messages: newMessages,
+      streaming: true,
+      abort: ctrl,
+    })
+
+    // 草稿会话：立即把 activeId 切到占位 sid，让 streamingSet/输入 disable 都能基于它工作。
+    if (!initialActiveId) {
+      setActiveId(sid)
+      activeIdRef.current = sid
+    }
+    if (activeIdRef.current === sid) {
+      setMessages(newMessages)
+    }
+    setStreamingSet((prev) => {
+      const next = new Set(prev)
+      next.add(sid)
+      return next
+    })
+
+    // 真实 sid（meta 事件会带回）。所有 SSE 回调通过它写 ref。
+    let realSid = sid
+    let bufVisible = ""
+    let respMessageId: string | null = null
+    let respThinking = ""
+
+    // 写 ref + 条件性同步 UI：仅当该 sid 仍是当前 active 时才 setMessages。
+    const updateMessages = (updater: (prev: ChatMessage[]) => ChatMessage[]) => {
+      const rt = runtimeRef.current.get(realSid)
+      if (!rt) return
+      const next = updater(rt.messages)
+      rt.messages = next
+      if (activeIdRef.current === realSid) {
+        setMessages(next)
+      }
+    }
 
     try {
-      let resolvedSid: string | null = activeId
-      let bufVisible = ""
-      let respMessageId: string | null = null
-      let respThinking = ""
       for await (const ev of chatStream(
         {
           message: text,
-          session_id: activeId,
+          session_id: initialActiveId, // 后端语义：null/空 → 新建会话
           enable_websearch: websearch,
           truncate_history_to: opts.truncateTo,
           images: imageAttachments.length
@@ -335,18 +467,48 @@ export default function ChatPage({ auth }: Props) {
         },
         ctrl.signal,
       )) {
-        // 若用户切换到了别的会话，发起此次请求时的 sid 与当前 active 不一致，
-        // 这次流式产物已不再属于当前视图，丢弃即可（实际请求也已被 abort）
         if (ctrl.signal.aborted) break
         if (ev.type === "meta") {
-          resolvedSid = ev.session_id || resolvedSid
+          const newSid = ev.session_id || realSid
           respMessageId = ev.message_id || respMessageId
-          if (resolvedSid && resolvedSid !== activeId) {
-            setActiveId(resolvedSid)
+          // 草稿 → 真实 sid 的迁移：把 runtime / streamingSet / activeId 三处 key 同步换掉
+          if (newSid !== realSid) {
+            const rt = runtimeRef.current.get(realSid)
+            if (rt) {
+              runtimeRef.current.set(newSid, rt)
+              runtimeRef.current.delete(realSid)
+            }
+            setStreamingSet((prev) => {
+              if (!prev.has(realSid)) return prev
+              const next = new Set(prev)
+              next.delete(realSid)
+              next.add(newSid)
+              return next
+            })
+            if (activeIdRef.current === realSid) {
+              setActiveId(newSid)
+              activeIdRef.current = newSid
+            }
+            realSid = newSid
           }
+          // 乐观把新会话立即插入侧栏：让用户即使切到草稿/别的会话，
+          // 也能在 Sidebar 看到这条还在跑的会话（带转圈）。
+          // 标题先用问题前 30 字占位，等 done 后 reloadSessions 会用后端摘要标题覆盖。
+          setSessions((prev) => {
+            if (prev.some((s) => s.session_id === realSid)) return prev
+            const placeholderTitle = text.trim().slice(0, 30) || "新会话"
+            return [
+              {
+                session_id: realSid,
+                title: placeholderTitle,
+                updated_at: new Date().toISOString(),
+              },
+              ...prev,
+            ]
+          })
         } else if (ev.type === "stage") {
           // 流式阶段提示：analyzing / tools / generating
-          setMessages((prev) => {
+          updateMessages((prev) => {
             const next = [...prev]
             const last = next[next.length - 1]
             if (last && last.role === "assistant" && last.pending) {
@@ -361,7 +523,7 @@ export default function ChatPage({ auth }: Props) {
         } else if (ev.type === "thinking_delta" && ev.content) {
           // 流式思考增量：累积到 streaming_thinking，气泡上方斜体浅色显示
           // 第一次到达即记录 thinking_started_at（performance.now 时间戳）
-          setMessages((prev) => {
+          updateMessages((prev) => {
             const next = [...prev]
             const last = next[next.length - 1]
             if (last && last.role === "assistant" && last.pending) {
@@ -376,11 +538,10 @@ export default function ChatPage({ auth }: Props) {
           })
         } else if (ev.type === "token" && ev.content) {
           bufVisible += ev.content
-          setMessages((prev) => {
+          updateMessages((prev) => {
             const next = [...prev]
             const last = next[next.length - 1]
             if (last && last.role === "assistant") {
-              // 思考阶段结束、首次进入正文 → 记录 thinking_duration_ms
               const isFirstToken = !last.content
               const finalDur =
                 last.thinking_duration_ms ??
@@ -398,13 +559,20 @@ export default function ChatPage({ auth }: Props) {
             return next
           })
         } else if (ev.type === "done") {
-          const finalReply = ev.reply || bufVisible
-          respThinking = ev.thinking || ""
-          setMessages((prev) => {
+          if (ev.ok === false && !(ev.reply || "").trim() && !(ev.thinking || "").trim()) {
+            continue
+          }
+          const replyTrim = (ev.reply || "").trim()
+          const thinkingTrim = (ev.thinking || "").trim()
+          const bufTrim = bufVisible.trim()
+          const finalReply = replyTrim || bufTrim || thinkingTrim
+          const usedThinkingAsBody =
+            !replyTrim && !bufTrim && Boolean(thinkingTrim)
+          respThinking = usedThinkingAsBody ? "" : ev.thinking || ""
+          updateMessages((prev) => {
             const next = [...prev]
             const last = next[next.length - 1]
             if (last && last.role === "assistant") {
-              // 兜底：done 之前可能完全没有 token（仅 thinking → done）
               const finalDur =
                 last.thinking_duration_ms ??
                 (last.thinking_started_at !== undefined
@@ -425,7 +593,7 @@ export default function ChatPage({ auth }: Props) {
             return next
           })
         } else if (ev.type === "error") {
-          setMessages((prev) => {
+          updateMessages((prev) => {
             const next = [...prev]
             const last = next[next.length - 1]
             if (last && last.role === "assistant") {
@@ -439,11 +607,10 @@ export default function ChatPage({ auth }: Props) {
         }
       }
     } catch (e) {
-      // AbortError 是用户主动取消（切换会话 / 停止生成），不展示为"生成失败"
       const err = e as Error & { name?: string }
       if (err?.name === "AbortError") {
-        // 取消时把最后一条 pending 的助手消息标记为已停止（若仍是 pending）
-        setMessages((prev) => {
+        // 用户主动停止：保留已生成的内容，标记 pending 关闭
+        updateMessages((prev) => {
           const next = [...prev]
           const last = next[next.length - 1]
           if (last && last.role === "assistant" && last.pending) {
@@ -456,7 +623,7 @@ export default function ChatPage({ auth }: Props) {
           return next
         })
       } else {
-        setMessages((prev) => {
+        updateMessages((prev) => {
           const next = [...prev]
           const last = next[next.length - 1]
           if (last && last.role === "assistant") {
@@ -469,8 +636,31 @@ export default function ChatPage({ auth }: Props) {
         })
       }
     } finally {
-      if (abortRef.current === ctrl) abortRef.current = null
-      setStreaming(false)
+      // 清掉该 sid 的 streaming + abort 句柄
+      const rt = runtimeRef.current.get(realSid)
+      if (rt) {
+        rt.streaming = false
+        rt.abort = null
+      }
+      setStreamingSet((prev) => {
+        if (!prev.has(realSid)) return prev
+        const next = new Set(prev)
+        next.delete(realSid)
+        return next
+      })
+      // 后台完成：用户已切走 → 标 unseen 红点 + toast 提示
+      const wasAborted = ctrl.signal.aborted
+      if (!wasAborted && activeIdRef.current !== realSid) {
+        setUnseenSet((prev) => {
+          if (prev.has(realSid)) return prev
+          const next = new Set(prev)
+          next.add(realSid)
+          return next
+        })
+        const sessionTitle =
+          sessions.find((s) => s.session_id === realSid)?.title || "新会话"
+        toast.success(`「${sessionTitle}」已生成完成`)
+      }
       void reloadSessions()
     }
   }
@@ -500,6 +690,8 @@ export default function ChatPage({ auth }: Props) {
             user={auth.user}
             sessions={sessions}
             activeId={activeId}
+            streamingSessions={streamingSet}
+            unseenSessions={unseenSet}
             searchInputRef={sidebarSearchRef}
             onNew={() => {
               newSession()
@@ -562,7 +754,7 @@ export default function ChatPage({ auth }: Props) {
           websearch={websearch}
           onWebsearchChange={setWebsearch}
           onSend={(t, imgs) => void send(t, imgs)}
-          onStop={cancelStream}
+          onStop={cancelActiveStream}
         />
       </main>
     </div>
