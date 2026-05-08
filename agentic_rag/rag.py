@@ -69,12 +69,28 @@ def _resolve_index_dir() -> Path:
     return preferred_index if preferred_index.exists() else BASE_DIR / "faiss_index"
 
 
+def _resolve_model_name(env_name: str, local_dir_name: str, remote_name: str) -> str:
+    model_env = os.getenv(env_name)
+    if model_env:
+        return model_env
+
+    local_model = BASE_DIR / "models" / local_dir_name
+    if local_model.is_dir():
+        return str(local_model)
+
+    return remote_name
+
+
 def _resolve_runtime_config() -> Dict[str, Any]:
     return {
         "index_dir": _resolve_index_dir(),
         "rebuild_index": os.getenv("RAG_REBUILD_INDEX", "0").lower() in {"1", "true", "yes"},
         "embedding_model_name": _resolve_embedding_model_name(os.getenv("EMBEDDING_MODEL_NAME")),
-        "reranker_model_name": os.getenv("RERANKER_MODEL_NAME", "BAAI/bge-reranker-v2-m3"),
+        "reranker_model_name": _resolve_model_name(
+        "RERANKER_MODEL_NAME",
+        "bge-reranker-v2-m3",
+        "BAAI/bge-reranker-v2-m3",
+),
         "disable_reranker": os.getenv("DISABLE_RERANKER", "0").lower() in {"1", "true", "yes"},
     }
 
